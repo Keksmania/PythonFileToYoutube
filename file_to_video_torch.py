@@ -633,8 +633,11 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         producer.stop(); consumer.stop()
     finally:
         frame_queue.put(None)
-        producer.join(timeout=10)
-        consumer.join(timeout=30)
+        logging.info("Waiting for producer thread to finish...")
+        producer.join()
+        logging.info("Producer thread finished. Waiting for FFmpeg consumer to flush to disk...")
+        consumer.join()
+        logging.info("FFmpeg consumer confirmed all segments written.")
         if consumer.output_paths:
             produced_files = consumer.output_paths.copy()
         else:
@@ -651,6 +654,24 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 produced_files = [legacy_name]
             except OSError as e:
                 logging.warning(f"Could not rename {current_part} to {legacy_name}: {e}")
+
+        normalized_files = []
+        for video_file in produced_files:
+            if video_file.suffix.lower() == ".mp4":
+                normalized_files.append(video_file)
+                continue
+            target = video_file.with_suffix(".mp4")
+            if target.exists():
+                target = video_file.with_name(video_file.name + ".mp4")
+            try:
+                video_file.rename(target)
+                logging.info(f"Normalized output filename '{video_file.name}' -> '{target.name}' (missing .mp4 extension).")
+                normalized_files.append(target)
+            except OSError as e:
+                logging.warning(f"Failed to append .mp4 extension to {video_file}: {e}")
+                normalized_files.append(video_file)
+
+        produced_files = normalized_files
 
         for video_file in produced_files:
             logging.info(f"Encoding pipeline finalized segment: {video_file}")
