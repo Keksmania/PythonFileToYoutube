@@ -1,0 +1,336 @@
+[INFO] 2025-11-15 14:49:01 - ==================== RUNNING TEST SUITE ====================
+[INFO] 2025-11-15 14:49:01 - Found GPU: NVIDIA GeForce RTX 3070 Ti with 8.59 GB of memory.
+[INFO] 2025-11-15 14:49:01 - PyTorch version: 2.9.0+cu130
+[INFO] 2025-11-15 14:49:01 - CUDA Runtime version: 13.0 | GPU Capability: 8.6
+[INFO] 2025-11-15 14:49:01 - --- Test 1: Hamming Codec Integrity ---
+[INFO] 2025-11-15 14:49:01 - PASS: Hamming codec correctly encoded, corrupted, and recovered data.
+[INFO] 2025-11-15 14:49:01 - --- Test 2: Pixel Conversion Round Trip ---
+[INFO] 2025-11-15 14:49:01 - frame_to_bits_batch: extracted 256 bits from 1 frames (16x16), bits_per_color=1
+[INFO] 2025-11-15 14:49:01 -   sample head=[1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1] tail=[1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1]
+[INFO] 2025-11-15 14:49:01 - PASS: Pixel to Bit to Pixel conversion is consistent.
+[INFO] 2025-11-15 14:49:01 - --- Test 3: Info Block Protocol Integrity ---
+[INFO] 2025-11-15 14:49:01 - Loading configuration from 'C:\Users\Alper\Downloads\PythonFileToYoutube\f2yt_config.json'
+[INFO] 2025-11-15 14:49:01 - Step 3: Generating info frame artifacts...
+[INFO] 2025-11-15 14:49:01 - --- ENCODING SUMMARY (Info Frames) ---
+[INFO] 2025-11-15 14:49:01 - JSON length: 244 bytes. Total payload with header: 248 bytes.
+[INFO] 2025-11-15 14:49:01 - Total payload bits: 1984
+[INFO] 2025-11-15 14:49:01 - Total Hamming(7,4) blocks: 496
+[INFO] 2025-11-15 14:49:01 -   Block 0  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 1  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 2  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 3  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 4  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 5  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 6  Data: [1 1 1 1] -> Encoded: [1 1 1 1 1 1 1]
+[INFO] 2025-11-15 14:49:01 -   Block 7  Data: [0 1 0 0] -> Encoded: [0 1 0 0 1 1 0]
+[INFO] 2025-11-15 14:49:01 -   Block 8  Data: [0 1 1 1] -> Encoded: [0 1 1 1 0 0 0]
+[INFO] 2025-11-15 14:49:01 -   Block 9  Data: [1 0 1 1] -> Encoded: [1 0 1 1 0 0 1]
+[INFO] 2025-11-15 14:49:01 -    Storing in manifest: info_frame_count=14, data_frame_count=1
+[INFO] 2025-11-15 14:49:01 - Generated 14 info frames. Result tensor shape: torch.Size([14, 16, 16, 4])
+[INFO] 2025-11-15 14:49:01 -    Generated 14 info frames at 16x16
+[INFO] 2025-11-15 14:49:01 -    Upscaled to 720x720 to simulate video extraction
+[INFO] 2025-11-15 14:49:01 - frame_to_bits_batch: extracted 3584 bits from 14 frames (16x16), bits_per_color=1
+[INFO] 2025-11-15 14:49:01 -   sample head=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] tail=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[INFO] 2025-11-15 14:49:01 - Info frames decoded with 0 corrected Hamming codewords.
+[INFO] 2025-11-15 14:49:01 - PASS: Info block protocol round trip is successful.
+[INFO] 2025-11-15 14:49:01 - --- Test 3.5: Data Frame Hamming(7,4) Protocol (32x32) ---
+[INFO] 2025-11-15 14:49:01 - Loading configuration from 'C:\Users\Alper\Downloads\PythonFileToYoutube\f2yt_config.json'
+[INFO] 2025-11-15 14:49:01 -    Test 3.5a: Direct Hamming(7,4) codec (no frames)
+[INFO] 2025-11-15 14:49:01 -    Encoded 5 Hamming blocks (35 coded bits)
+[INFO] 2025-11-15 14:49:01 -    Direct decode: 0 errors, 20 data bits
+[INFO] 2025-11-15 14:49:01 -    [OK] Direct Hamming(7,4) works (no corruption)
+[INFO] 2025-11-15 14:49:01 -    Test 3.5b: Pixel conversion round-trip (32x32, no upscaling)
+[INFO] 2025-11-15 14:49:01 - frame_to_bits_batch: extracted 2048 bits from 1 frames (32x32), bits_per_color=2
+[INFO] 2025-11-15 14:49:01 -   sample head=[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1] tail=[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+[INFO] 2025-11-15 14:49:01 -    [OK] Pixel round-trip works at 32x32 (2048 bits preserved)
+[INFO] 2025-11-15 14:49:01 -    Test 3.5c: Full round-trip at native 32x32 (Hamming + frame conversion)
+[INFO] 2025-11-15 14:49:02 -    Frame colors (3 unique): [[0, 0, 255, 255], [0, 255, 0, 255], [255, 0, 0, 255]]
+[INFO] 2025-11-15 14:49:02 - frame_to_bits_batch: extracted 2048 bits from 1 frames (32x32), bits_per_color=2
+[INFO] 2025-11-15 14:49:02 -   sample head=[0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1] tail=[0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1]
+[INFO] 2025-11-15 14:49:02 - PASS: 32x32 data frame Hamming round trip with 1 residual bit(s) (PAR2 will correct)
+[INFO] 2025-11-15 14:49:02 - --- Test 3.6: Large Data Encoding (100KB with 32x32 Frames) ---
+[INFO] 2025-11-15 14:49:02 - Loading configuration from 'C:\Users\Alper\Downloads\PythonFileToYoutube\f2yt_config.json'
+[INFO] 2025-11-15 14:49:02 -    Generated 102400 bytes (819200 bits) of random test data
+[INFO] 2025-11-15 14:49:02 -    Hamming encoded 204800 blocks (1433600 coded bits)
+[INFO] 2025-11-15 14:49:02 -    Need 700 frames of 32x32 to store 1433600 bits
+[INFO] 2025-11-15 14:49:02 -    Created 700 frames at 32x32
+[INFO] 2025-11-15 14:49:02 - frame_to_bits_batch: extracted 1433600 bits from 700 frames (32x32), bits_per_color=2
+[INFO] 2025-11-15 14:49:02 -   sample head=[1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1] tail=[0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1]
+[INFO] 2025-11-15 14:49:02 -    Frame round-trip: 0/1433600 bits differ (0.0000% BER)
+[INFO] 2025-11-15 14:49:02 -    Hamming decoded: 0 codewords corrected, recovered 819200 data bits
+[INFO] 2025-11-15 14:49:02 - PASS: 100KB large data test successful (0 bit mismatches)!
+[INFO] 2025-11-15 14:49:02 - --- Test 4: Full Encode/Decode Round Trip (180x180 frames) ---
+[INFO] 2025-11-15 14:49:02 - Loading configuration from 'C:\Users\Alper\Downloads\PythonFileToYoutube\f2yt_config.json'
+[INFO] 2025-11-15 14:49:02 - Starting encoding for 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\test_file.txt'...
+[INFO] 2025-11-15 14:49:02 - Step 1: Preparing and archiving files...
+[INFO] 2025-11-15 14:49:02 - Compressing data payload with 7-Zip...
+[INFO] 2025-11-15 14:49:02 - Running command: 7z a -y 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\temp_encode_processing\test_file_data_archive.7z' 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\test_file.txt' -ptestpass -mhe=on
+[INFO] 2025-11-15 14:49:02 - STDOUT:
+7-Zip 22.01 (x64) : Copyright (c) 1999-2022 Igor Pavlov : 2022-07-15
+
+Scanning the drive:
+1 file, 7000 bytes (7 KiB)
+
+Creating archive: C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\temp_encode_processing\test_file_data_archive.7z
+
+Add new data to archive: 1 file, 7000 bytes (7 KiB)
+
+
+Files read from disk: 1
+Archive size: 319 bytes (1 KiB)
+Everything is Ok
+[INFO] 2025-11-15 14:49:02 - Creating PAR2 recovery files...
+[INFO] 2025-11-15 14:49:02 - Running command: par2 c -qq -r30 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\temp_encode_processing\recovery_set.par2' 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\temp_encode_processing\test_file_data_archive.7z'
+[INFO] 2025-11-15 14:49:02 - Generating file manifest...
+[INFO] 2025-11-15 14:49:02 - File preparation complete. 7 files generated.
+[INFO] 2025-11-15 14:49:02 - Step 3: Generating info frame artifacts...
+[INFO] 2025-11-15 14:49:02 - --- ENCODING SUMMARY (Info Frames) ---
+[INFO] 2025-11-15 14:49:02 - JSON length: 660 bytes. Total payload with header: 664 bytes.
+[INFO] 2025-11-15 14:49:02 - Total payload bits: 5312
+[INFO] 2025-11-15 14:49:02 - Total Hamming(7,4) blocks: 1328
+[INFO] 2025-11-15 14:49:02 -   Block 0  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 1  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 2  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 3  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 4  Data: [0 0 0 0] -> Encoded: [0 0 0 0 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 5  Data: [0 0 1 0] -> Encoded: [0 0 1 0 1 0 1]
+[INFO] 2025-11-15 14:49:02 -   Block 6  Data: [1 0 0 1] -> Encoded: [1 0 0 1 1 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 7  Data: [0 1 0 0] -> Encoded: [0 1 0 0 1 1 0]
+[INFO] 2025-11-15 14:49:02 -   Block 8  Data: [0 1 1 1] -> Encoded: [0 1 1 1 0 0 0]
+[INFO] 2025-11-15 14:49:02 -   Block 9  Data: [1 0 1 1] -> Encoded: [1 0 1 1 0 0 1]
+[INFO] 2025-11-15 14:49:02 -    Storing in manifest: info_frame_count=37, data_frame_count=7
+[INFO] 2025-11-15 14:49:02 - Generated 37 info frames. Result tensor shape: torch.Size([37, 16, 16, 4])
+[INFO] 2025-11-15 14:49:02 - Step 2: Generating barcode frame...
+[INFO] 2025-11-15 14:49:02 - Generated barcode for 37 info frames and 60 FPS.
+[INFO] 2025-11-15 14:49:02 - DataProducerThread started.
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.par2
+[INFO] 2025-11-15 14:49:02 - FFmpegConsumerThread started.
+[INFO] 2025-11-15 14:49:02 - --- Starting main processing pipeline ---
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.vol00+1.par2
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.vol01+2.par2
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.vol03+4.par2
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.vol07+8.par2
+[INFO] 2025-11-15 14:49:02 - Producer reading: recovery_set.vol15+9.par2
+[INFO] 2025-11-15 14:49:02 - Producer reading: test_file_data_archive.7z
+[INFO] 2025-11-15 14:49:02 - Handling final 251960 bits.
+[INFO] 2025-11-15 14:49:02 - DataProducerThread finished.
+[INFO] 2025-11-15 14:49:03 - encode_data_frames_gpu: produced 2048 frames (k_side=180), bits_per_frame=64792, actual_payload=75825152 bits
+[INFO] 2025-11-15 14:49:03 - Encoder produced pixel tensor: frames=2048, shape=(2048, 180, 180, 4)
+[INFO] 2025-11-15 14:49:08 - FFmpegConsumerThread finished.
+[INFO] 2025-11-15 14:49:08 - Encoding pipeline finished. Video saved to C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\test_file_F2YT.mp4
+[INFO] 2025-11-15 14:49:08 - --- ENCODING SUMMARY (Overall) ---
+[INFO] 2025-11-15 14:49:08 - Original Input: C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\test_file.txt
+[INFO] 2025-11-15 14:49:08 - Total Payload Size (after 7z/par2): 30.76 KB
+[INFO] 2025-11-15 14:49:08 - Output Video: C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\test_file_F2YT.mp4
+[INFO] 2025-11-15 14:49:08 - Output Video Size: 4.17 MB
+[INFO] 2025-11-15 14:49:08 - Storage Ratio (Video Size / Payload Size): 138.87
+[INFO] 2025-11-15 14:49:08 - Starting decoding for 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\output\test_file_F2YT.mp4'...
+[INFO] 2025-11-15 14:49:08 - Decoded barcode: 37 info frames, 60 FPS.
+[INFO] 2025-11-15 14:49:11 - Read 37 info frames from barcode (37 reported). Decoding them...
+[INFO] 2025-11-15 14:49:11 - frame_to_bits_batch: extracted 9472 bits from 37 frames (16x16), bits_per_color=1
+[INFO] 2025-11-15 14:49:11 -   sample head=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] tail=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[INFO] 2025-11-15 14:49:11 - Info frames decoded with 0 corrected Hamming codewords.
+[INFO] 2025-11-15 14:49:11 - Successfully decoded info JSON.
+[INFO] 2025-11-15 14:49:11 - Decoded manifest fields: info_frame_count=37, data_frame_count=7
+[INFO] 2025-11-15 14:49:11 - DataWriterThread started.
+[INFO] 2025-11-15 14:49:11 -    Manifest advertised encoded bit budget: 440930 bits
+[INFO] 2025-11-15 14:49:11 - [OK] Using data_frame_count from manifest: 7 frames (padding frames will be ignored)
+[INFO] 2025-11-15 14:49:11 - Data extraction will process frames 38 to 44 (total 7 data frames)
+[INFO] 2025-11-15 14:49:11 - DEBUG: Will extract data frames with indices 38 to 44
+[INFO] 2025-11-15 14:49:11 - Processing data frame batch: logical indices 38 to 44 (frame_num offsets: 0 to 6)...
+[INFO] 2025-11-15 14:49:11 - frame_to_bits_batch: extracted 453600 bits from 7 frames (180x180), bits_per_color=2
+[INFO] 2025-11-15 14:49:11 -   sample head=[0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1] tail=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[INFO] 2025-11-15 14:49:11 - Data decode: extracted 453600 bits from 7 frames
+[INFO] 2025-11-15 14:49:11 -   Expected: 440930 bits (64792/frame nominal, 440930 actual)
+[INFO] 2025-11-15 14:49:11 -   Actual per frame extracted: 64800 bits
+[INFO] 2025-11-15 14:49:11 -   Padding per frame: 8 bits
+[INFO] 2025-11-15 14:49:11 -   Discarding 12670 total padding bits (1810.0 per frame)
+[INFO] 2025-11-15 14:49:11 -   Trimming 12614 padding bits after per-frame alignment to match actual payload.
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.vol00+1.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.vol01+2.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.vol03+4.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.vol07+8.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing recovery_set.vol15+9.par2
+[INFO] 2025-11-15 14:49:11 - Finished writing test_file_data_archive.7z
+[INFO] 2025-11-15 14:49:11 - DataWriterThread finished.
+[INFO] 2025-11-15 14:49:11 - --- DECODING SUMMARY (Data Frames) ---
+[INFO] 2025-11-15 14:49:11 - Total codewords with errors corrected: 6
+[INFO] 2025-11-15 14:49:11 - Data reconstruction finished. Starting final recovery (par2/7z).
+[INFO] 2025-11-15 14:49:11 - Running command: par2 r -a recovery_set.par2
+[INFO] 2025-11-15 14:49:11 - STDOUT:
+Loading "recovery_set.par2".
+Loading: 4.5%
+Loading: 11.8%
+Loading: 94.6%
+Loaded 4 new packets
+Loading "recovery_set.vol00+1.par2".
+Loading: 4.3%
+Loading: 11.4%
+Loading: 91.4%
+Loading: 96.5%
+Loaded 1 new packets including 1 recovery blocks
+Loading "recovery_set.vol01+2.par2".
+Loading: 2.2%
+Loading: 5.8%
+Loading: 46.9%
+Loading: 49.5%
+Loading: 51.3%
+Loading: 53.5%
+Loading: 57.1%
+Loading: 98.2%
+No new packets found
+Loading "recovery_set.vol01+2.par2".
+Loading: 2.2%
+Loading: 5.8%
+Loading: 46.9%
+Loading: 49.5%
+Loading: 51.3%
+Loading: 53.5%
+Loading: 57.1%
+Loading: 98.2%
+No new packets found
+Loading "recovery_set.vol03+4.par2".
+Loading: 1.4%
+Loading: 3.8%
+Loading: 31.1%
+Loading: 32.9%
+Loading: 34.1%
+Loading: 35.6%
+Loading: 38.0%
+Loading: 65.3%
+Loading: 67.0%
+Loading: 68.2%
+Loading: 69.7%
+Loading: 72.1%
+Loaded 1 new packets including 1 recovery blocks
+Loading "recovery_set.vol07+8.par2".
+Loading: 1.0%
+Loading: 2.8%
+Loading: 22.9%
+Loading: 24.2%
+Loading: 25.1%
+Loading: 26.2%
+Loading: 27.9%
+Loading: 48.0%
+Loading: 49.3%
+Loading: 50.2%
+Loading: 51.3%
+Loading: 53.0%
+Loading: 73.1%
+Loading: 74.0%
+Loading: 75.1%
+Loading: 76.9%
+Loading: 96.9%
+Loading: 98.2%
+Loading: 99.1%
+Loaded 2 new packets including 2 recovery blocks
+Loading "recovery_set.vol15+9.par2".
+Loading: 1.0%
+Loading: 2.8%
+Loading: 22.7%
+Loading: 24.0%
+Loading: 24.8%
+Loading: 25.9%
+Loading: 27.7%
+Loading: 47.6%
+Loading: 48.9%
+Loading: 49.7%
+Loading: 50.8%
+Loading: 52.6%
+Loading: 72.5%
+Loading: 73.3%
+Loading: 74.4%
+Loading: 76.2%
+Loading: 96.1%
+Loading: 97.4%
+Loading: 98.2%
+No new packets found
+Loading "recovery_set.vol15+9.par2".
+Loading: 1.0%
+Loading: 2.8%
+Loading: 22.7%
+Loading: 24.0%
+Loading: 24.8%
+Loading: 25.9%
+Loading: 27.7%
+Loading: 47.6%
+Loading: 48.9%
+Loading: 49.7%
+Loading: 50.8%
+Loading: 52.6%
+Loading: 72.5%
+Loading: 73.3%
+Loading: 74.4%
+Loading: 76.2%
+Loading: 96.1%
+Loading: 97.4%
+Loading: 98.2%
+No new packets found
+Loading "recovery_set.par2".
+Loading: 4.5%
+Loading: 11.8%
+Loading: 94.6%
+No new packets found
+
+There are 1 recoverable files and 0 other files.
+The block size used was 4 bytes.
+There are a total of 80 data blocks.
+The total size of the data files is 319 bytes.
+
+Verifying source files:
+
+Opening: "test_file_data_archive.7z"
+Scanning: 1.2%
+Scanning: 2.5%
+Scanning: 99.0%
+Scanning: 99.3%
+Scanning: 99.6%
+Target: "test_file_data_archive.7z" - damaged. Found 2 of 80 data blocks.
+
+Scanning extra files:
+
+
+Repair is required.
+1 file(s) exist but are damaged.
+You have 2 out of 80 data blocks available.
+You have 4 recovery blocks available.
+Repair is not possible.
+You need 74 more recovery blocks to be able to repair.
+[ERROR] 2025-11-15 14:49:11 - Command failed with exit code 2.
+[INFO] 2025-11-15 14:49:11 - Running command: 7z x -ptestpass -y '-oC:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\Decoded_Files' 'C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\temp_decode_processing\assembled_files\test_file_data_archive.7z'
+[INFO] 2025-11-15 14:49:12 - STDOUT:
+7-Zip 22.01 (x64) : Copyright (c) 1999-2022 Igor Pavlov : 2022-07-15
+
+Scanning the drive for archives:
+1 file, 319 bytes (1 KiB)
+
+Extracting archive: C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\temp_decode_processing\assembled_files\test_file_data_archive.7z
+
+Can't open as archive: 1
+Files: 0
+Size:       0
+Compressed: 0
+[ERROR] 2025-11-15 14:49:12 - STDERR:
+ERROR: C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\temp_decode_processing\assembled_files\test_file_data_archive.7z
+C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\temp_decode_processing\assembled_files\test_file_data_archive.7z
+Open ERROR: Cannot open the file as [7z] archive
+
+
+ERRORS:
+Is not archive
+[ERROR] 2025-11-15 14:49:12 - Command failed with exit code 2.
+[WARNING] 2025-11-15 14:49:12 - Extraction failed, likely due to incorrect password.
+[WARNING] 2025-11-15 14:49:18 - Skipping final extraction.
+[INFO] 2025-11-15 14:49:18 - Decoding process completed.
+[ERROR] 2025-11-15 14:49:18 - FAIL: Full Round Trip assertion failed: Decoded file not found at C:\Users\Alper\AppData\Local\Temp\tmp999x6mj3\decoded\Decoded_Files\test_file.txt
+[INFO] 2025-11-15 14:49:18 - ==================== TEST SUITE SUMMARY ====================
+[INFO] 2025-11-15 14:49:18 - Passed: 5
+[INFO] 2025-11-15 14:49:18 -   - Hamming Codec
+[INFO] 2025-11-15 14:49:18 -   - Pixel Conversion
+[INFO] 2025-11-15 14:49:18 -   - Info Block Protocol
+[INFO] 2025-11-15 14:49:18 -   - Data Frame 32x32 Hamming
+[INFO] 2025-11-15 14:49:18 -   - Large Data 100KB
+[ERROR] 2025-11-15 14:49:18 - Failed: 1
+[ERROR] 2025-11-15 14:49:18 -   - Full Round Trip
+[INFO] 2025-11-15 14:49:18 - ==========================================================
