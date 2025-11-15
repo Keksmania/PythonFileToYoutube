@@ -81,7 +81,8 @@ def load_config() -> Dict[str, Any]:
         "VIDEO_WIDTH": 720, "VIDEO_HEIGHT": 720, "VIDEO_FPS": 60,
         "DATA_K_SIDE": 180, "NUM_COLORS_DATA": 4,
         "PAR2_REDUNDANCY_PERCENT": 30, "X264_CRF": 30,
-        "CPU_PRODUCER_CHUNK_MB": 128, "GPU_PROCESSOR_BATCH_SIZE": 2048
+        "CPU_PRODUCER_CHUNK_MB": 128, "GPU_PROCESSOR_BATCH_SIZE": 2048,
+        "MAX_VIDEO_SEGMENT_HOURS": 11
     }
     if not config_path.exists():
         logging.info(f"Config file not found. Creating default at '{config_path}'")
@@ -465,49 +466,116 @@ class DataProducerThread(threading.Thread):
     def stop(self): self.stop_event.set()
 
 class FFmpegConsumerThread(threading.Thread):
-    def __init__(self, frame_queue: queue.Queue, output_path: Path, config: Dict):
+    def __init__(self, frame_queue: queue.Queue, output_base_path: Path, config: Dict):
         super().__init__(daemon=True)
-        self.frame_queue, self.output_path, self.config = frame_queue, output_path, config
-        self.ffmpeg_process, self.stop_event, self.sub_batch_size = None, threading.Event(), 32
-    def run(self):
-        logging.info("FFmpegConsumerThread started.")
-        width, height, crf, fps = self.config["VIDEO_WIDTH"], self.config["VIDEO_HEIGHT"], self.config["X264_CRF"], self.config["VIDEO_FPS"]
-        command = [
+        self.frame_queue, self.config = frame_queue, config
+        self.stop_event = threading.Event()
+        self.sub_batch_size = 32
+        self.ffmpeg_process: Optional[subprocess.Popen] = None
+        self.frames_written_in_segment = 0
+        self.output_paths: List[Path] = []
+        self.output_parent = output_base_path.parent
+        self.output_stem = output_base_path.stem if output_base_path.suffix else output_base_path.name
+
+        width = self.config["VIDEO_WIDTH"]
+        height = self.config["VIDEO_HEIGHT"]
+        crf = self.config["X264_CRF"]
+        fps = self.config["VIDEO_FPS"]
+        self.ffmpeg_command_base = [
             self.config["FFMPEG_PATH"], '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}', '-pix_fmt', 'rgba', '-r', str(fps), '-i', '-',
             '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage',
-            '-keyint_min', '1', 
-            '-sc_threshold', '0',  
-            '-crf', str(crf),  
-            '-movflags', '+faststart',
-            str(self.output_path)
+            '-keyint_min', '1',
+            '-sc_threshold', '0',
+            '-crf', str(crf),
+            '-movflags', '+faststart'
         ]
+
+        max_hours = self.config.get("MAX_VIDEO_SEGMENT_HOURS", 11)
+        if max_hours and max_hours > 0:
+            self.max_frames_per_segment = int(max_hours * 3600 * fps)
+            logging.info(f"FFmpeg consumer will rotate files every {self.max_frames_per_segment} frames (~{max_hours}h @ {fps}fps)")
+        else:
+            self.max_frames_per_segment = None
+
+        override_frames = self.config.get("MAX_VIDEO_SEGMENT_FRAMES_OVERRIDE")
+        if override_frames and override_frames > 0:
+            override_frames = int(override_frames)
+            if self.max_frames_per_segment is None:
+                self.max_frames_per_segment = override_frames
+            else:
+                self.max_frames_per_segment = min(self.max_frames_per_segment, override_frames)
+            logging.info(f"Segment frame override active: {self.max_frames_per_segment} frame(s) per MP4 segment.")
+
+    def _build_output_path(self, segment_index: int) -> Path:
+        if self.max_frames_per_segment is None:
+            return self.output_parent / f"{self.output_stem}.mp4"
+        return self.output_parent / f"{self.output_stem}_part{segment_index:03d}.mp4"
+
+    def _start_new_segment(self):
+        segment_index = len(self.output_paths) + 1
+        output_path = self._build_output_path(segment_index)
+        command = self.ffmpeg_command_base + [str(output_path)]
+        logging.info(f"Starting FFmpeg segment #{segment_index}: {output_path}")
+        self.ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.output_paths.append(output_path)
+        self.frames_written_in_segment = 0
+
+    def _finalize_current_segment(self):
+        if self.ffmpeg_process and self.ffmpeg_process.stdin:
+            try:
+                self.ffmpeg_process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        if self.ffmpeg_process:
+            _, stderr = self.ffmpeg_process.communicate()
+            if self.ffmpeg_process.returncode != 0 and not self.stop_event.is_set():
+                logging.error(
+                    f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}:\n{stderr.decode('utf-8', 'ignore')}"
+                )
+        self.ffmpeg_process = None
+        self.frames_written_in_segment = 0
+
+    def _write_frame(self, frame_np: np.ndarray):
+        if self.ffmpeg_process is None:
+            self._start_new_segment()
+        if self.ffmpeg_process is None or self.ffmpeg_process.stdin is None:
+            return
+        self.ffmpeg_process.stdin.write(frame_np.tobytes())
+        self.frames_written_in_segment += 1
+        if self.max_frames_per_segment and self.frames_written_in_segment >= self.max_frames_per_segment:
+            logging.info("Segment reached maximum duration; rotating to a new MP4 file.")
+            self._finalize_current_segment()
+
+    def run(self):
+        logging.info("FFmpegConsumerThread started.")
+        width = self.config["VIDEO_WIDTH"]
+        height = self.config["VIDEO_HEIGHT"]
         try:
-            self.ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             while not self.stop_event.is_set():
                 frame_batch = self.frame_queue.get()
-                if frame_batch is None: break
+                if frame_batch is None:
+                    break
                 for sub_batch in torch.split(frame_batch, self.sub_batch_size):
                     if sub_batch.shape[1] != height or sub_batch.shape[2] != width:
                          sub_batch_resized = torch.nn.functional.interpolate(
                              sub_batch.permute(0, 3, 1, 2).float(), size=(height, width), mode='nearest-exact'
                          ).permute(0, 2, 3, 1).byte()
-                    else: sub_batch_resized = sub_batch
-                    self.ffmpeg_process.stdin.write(sub_batch_resized.cpu().numpy().tobytes())
+                    else:
+                        sub_batch_resized = sub_batch
+                    np_batch = sub_batch_resized.cpu().numpy()
+                    for frame_np in np_batch:
+                        if self.stop_event.is_set():
+                            break
+                        self._write_frame(frame_np)
         except (BrokenPipeError, OSError):
             logging.warning("FFmpeg pipe closed, likely due to an early exit or shutdown.")
         except Exception as e:
             logging.error(f"Error in FFmpegConsumerThread: {e}", exc_info=True)
         finally:
-            if self.ffmpeg_process and self.ffmpeg_process.stdin:
-                try: self.ffmpeg_process.stdin.close()
-                except (BrokenPipeError, OSError): pass
-            if self.ffmpeg_process:
-                _, stderr = self.ffmpeg_process.communicate()
-                if self.ffmpeg_process.returncode != 0 and not self.stop_event.is_set():
-                    logging.error(f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}:\n{stderr.decode('utf-8', 'ignore')}")
-                self.ffmpeg_process.wait()
+            self._finalize_current_segment()
             logging.info("FFmpegConsumerThread finished.")
+
     def stop(self):
         self.stop_event.set()
         if self.ffmpeg_process:
@@ -516,6 +584,7 @@ class FFmpegConsumerThread(threading.Thread):
                 self.ffmpeg_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.ffmpeg_process.kill()
+        self._finalize_current_segment()
 
 def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[str], config: Dict, device: torch.device):
     logging.info(f"Starting encoding for '{input_path}'...")
@@ -531,10 +600,10 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
     if info_frames_batch is None: return
     barcode_frame_batch = generate_barcode_frame(info_frames_batch.shape[0], config, device)
     if barcode_frame_batch is None: return
-    output_video_path = output_dir / f"{input_path.stem}_F2YT.mp4"
+    output_base_path = output_dir / f"{input_path.stem}_F2YT"
     data_queue, frame_queue = queue.Queue(maxsize=4), queue.Queue(maxsize=4)
     producer = DataProducerThread(files_to_encode, data_queue, derived_params)
-    consumer = FFmpegConsumerThread(frame_queue, output_video_path, config)
+    consumer = FFmpegConsumerThread(frame_queue, output_base_path, config)
     producer.start(); consumer.start()
     try:
         logging.info("--- Starting main processing pipeline ---")
@@ -564,17 +633,39 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         frame_queue.put(None)
         producer.join(timeout=10)
         consumer.join(timeout=30)
-        logging.info(f"Encoding pipeline finished. Video saved to {output_video_path}")
+        if consumer.output_paths:
+            produced_files = consumer.output_paths.copy()
+        else:
+            default_name = output_base_path if output_base_path.suffix else output_base_path.parent / f"{output_base_path.name}.mp4"
+            produced_files = [default_name]
+
+        segmentation_enabled = config.get("MAX_VIDEO_SEGMENT_HOURS", 11)
+        if segmentation_enabled and len(produced_files) == 1 and produced_files[0].name.endswith("_part001.mp4"):
+            legacy_name = output_base_path if output_base_path.suffix else output_base_path.parent / f"{output_base_path.name}.mp4"
+            current_part = produced_files[0]
+            try:
+                current_part.rename(legacy_name)
+                logging.info(f"Renamed single segment {current_part.name} -> {legacy_name.name} for backwards compatibility.")
+                produced_files = [legacy_name]
+            except OSError as e:
+                logging.warning(f"Could not rename {current_part} to {legacy_name}: {e}")
+
+        for video_file in produced_files:
+            logging.info(f"Encoding pipeline finalized segment: {video_file}")
+        logging.info("Encoding pipeline finished.")
     total_payload_size = sum(f.stat().st_size for f in files_to_encode)
     logging.info("--- ENCODING SUMMARY (Overall) ---")
     logging.info(f"Original Input: {input_path}")
     logging.info(f"Total Payload Size (after 7z/par2): {total_payload_size / 1024:.2f} KB")
-    logging.info(f"Output Video: {output_video_path}")
-    if output_video_path.exists():
-        video_size = output_video_path.stat().st_size
-        logging.info(f"Output Video Size: {video_size / (1024*1024):.2f} MB")
-        if total_payload_size > 0:
-            logging.info(f"Storage Ratio (Video Size / Payload Size): {video_size / total_payload_size:.2f}")
+    logging.info("Output Video Files:")
+    for video_file in produced_files:
+        if video_file.exists():
+            video_size = video_file.stat().st_size
+            logging.info(f"  - {video_file} ({video_size / (1024*1024):.2f} MB)")
+            if total_payload_size > 0:
+                logging.info(f"    Storage Ratio: {video_size / total_payload_size:.2f}")
+        else:
+            logging.info(f"  - {video_file} (missing on disk)")
 
 # --- Decoding Pipeline ---
 
@@ -677,19 +768,20 @@ def extract_frame_as_tensor(video_path: Path, frame_index: int, temp_dir: Path, 
         logging.error(f"An error occurred loading extracted frame {frame_index}: {e}")
         return None
 
-def extract_data_frames_batch(video_path: Path, start_frame_index: int, frame_count: int, config: Dict) -> Optional[torch.Tensor]:
-    """Extract a contiguous batch of data frames in a single ffmpeg invocation.
-
-    Returns a CPU tensor shaped (frame_count, DATA_K_SIDE, DATA_K_SIDE, 4) on success,
-    or None if extraction fails. Missing frames are reported to the caller so they can
-    decide how to handle padding/fallback logic.
-    """
+def extract_frames_batch(video_path: Path, start_frame_index: int, frame_count: int, config: Dict, frame_type: str = 'data') -> Optional[torch.Tensor]:
+    """Extract a contiguous batch of frames of the requested type in one ffmpeg invocation."""
     if frame_count <= 0:
         return None
 
     ffmpeg_path = config["FFMPEG_PATH"]
     fps = config.get("VIDEO_FPS", 60)
-    extract_size = config.get("DATA_K_SIDE", 180)
+    if frame_type == 'info':
+        extract_size = INFO_K_SIDE
+    elif frame_type == 'barcode':
+        extract_size = max(config.get("VIDEO_WIDTH", 720), config.get("VIDEO_HEIGHT", 720))
+    else:
+        extract_size = config.get("DATA_K_SIDE", 180)
+
     timestamp = start_frame_index / fps
     scale_filter = (
         f"scale={extract_size}:{extract_size}:flags=neighbor:force_original_aspect_ratio=decrease,"
@@ -713,31 +805,33 @@ def extract_data_frames_batch(video_path: Path, start_frame_index: int, frame_co
         proc = subprocess.run(command, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         logging.error(
-            "Batched ffmpeg extraction failed for frames %d-%d. stderr=%s",
+            "Batched ffmpeg extraction failed for frames %d-%d (%s). stderr=%s",
             start_frame_index,
             start_frame_index + frame_count - 1,
+            frame_type,
             e.stderr.decode('utf-8', 'ignore') if e.stderr else 'no stderr'
         )
         return None
     except Exception as e:
-        logging.error(f"Unexpected error while extracting frame batch starting at {start_frame_index}: {e}")
+        logging.error(f"Unexpected error while extracting frame batch starting at {start_frame_index} ({frame_type}): {e}")
         return None
 
     raw = proc.stdout
     if not raw:
-        logging.error("FFmpeg returned no pixel data for frames %d-%d", start_frame_index, start_frame_index + frame_count - 1)
+        logging.error("FFmpeg returned no pixel data for frames %d-%d (%s)", start_frame_index, start_frame_index + frame_count - 1, frame_type)
         return None
 
     bytes_per_frame = extract_size * extract_size * 4
     total_bytes = len(raw)
     actual_frames = total_bytes // bytes_per_frame
     if actual_frames == 0:
-        logging.error("FFmpeg output (%d bytes) too small for even a single %dx%dx4 frame", total_bytes, extract_size, extract_size)
+        logging.error("FFmpeg output (%d bytes) too small for even a single %dx%dx4 frame (%s)", total_bytes, extract_size, extract_size, frame_type)
         return None
     if actual_frames < frame_count:
         logging.warning(
-            "Requested %d frames starting at %d but only received %d. Will pad the remainder with zeros.",
+            "Requested %d %s frame(s) starting at %d but only received %d. Will pad the remainder with zeros.",
             frame_count,
+            frame_type,
             start_frame_index,
             actual_frames
         )
@@ -746,6 +840,87 @@ def extract_data_frames_batch(video_path: Path, start_frame_index: int, frame_co
     np_buffer = np.frombuffer(raw[:usable_bytes], dtype=np.uint8).copy()
     frame_tensor = torch.from_numpy(np_buffer).view(actual_frames, extract_size, extract_size, 4).to(torch.uint8)
     return frame_tensor
+
+
+class SegmentedDataFrameReader:
+    """Iterates through multiple MP4 segments as if they were a single continuous stream."""
+
+    def __init__(self, video_paths: List[Path], config: Dict, temp_dir: Path, initial_frame_offset: int, frame_type: str = 'data'):
+        self.video_paths = video_paths
+        self.config = config
+        self.temp_dir = temp_dir
+        self.initial_frame_offset = max(0, initial_frame_offset)
+        self.current_video_idx = 0
+        self.local_frame_idx = self.initial_frame_offset
+        self.offset_consumed = self.initial_frame_offset == 0
+        self.frame_type = frame_type
+
+    def _advance_video(self):
+        self.current_video_idx += 1
+        self.local_frame_idx = 0
+        self.offset_consumed = True
+
+    def _current_video(self) -> Optional[Path]:
+        if self.current_video_idx >= len(self.video_paths):
+            return None
+        return self.video_paths[self.current_video_idx]
+
+    def _fallback_extract_frames(self, video_path: Path, start_index: int, frame_count: int) -> Optional[torch.Tensor]:
+        frames: List[torch.Tensor] = []
+        for offset in range(frame_count):
+            actual_frame = start_index + offset
+            frame = extract_frame_as_tensor(video_path, actual_frame, self.temp_dir, self.config, frame_type=self.frame_type)
+            if frame is None:
+                break
+            frames.append(frame)
+        if not frames:
+            return None
+        return torch.stack(frames)
+
+    def fetch_frames(self, desired_count: int) -> Optional[torch.Tensor]:
+        if desired_count <= 0:
+            return torch.empty((0, self.config['DATA_K_SIDE'], self.config['DATA_K_SIDE'], 4), dtype=torch.uint8)
+
+        collected = []
+        remaining = desired_count
+
+        while remaining > 0:
+            video_path = self._current_video()
+            if video_path is None:
+                break
+
+            if not self.offset_consumed:
+                self.local_frame_idx = self.initial_frame_offset
+                self.offset_consumed = True
+
+            batch_tensor = None
+            if self.frame_type == 'data':
+                batch_tensor = extract_frames_batch(video_path, self.local_frame_idx, remaining, self.config, frame_type='data')
+            elif self.frame_type == 'info':
+                batch_tensor = extract_frames_batch(video_path, self.local_frame_idx, remaining, self.config, frame_type='info')
+            elif self.frame_type == 'barcode':
+                batch_tensor = extract_frames_batch(video_path, self.local_frame_idx, remaining, self.config, frame_type='barcode')
+            if batch_tensor is None or batch_tensor.shape[0] == 0:
+                logging.warning(f"Failed batched extraction for {video_path} at frame {self.local_frame_idx}. Falling back to single-frame extraction.")
+                batch_tensor = self._fallback_extract_frames(video_path, self.local_frame_idx, remaining)
+
+            if batch_tensor is None or batch_tensor.shape[0] == 0:
+                logging.warning(f"No more frames available in {video_path}. Moving to next segment.")
+                self._advance_video()
+                continue
+
+            collected.append(batch_tensor)
+            actual = batch_tensor.shape[0]
+            remaining -= actual
+            self.local_frame_idx += actual
+
+            if remaining > 0:
+                self._advance_video()
+
+        if not collected:
+            return None
+
+        return torch.cat(collected, dim=0)
 
 def decode_barcode(frame_tensor: torch.Tensor) -> Optional[Tuple[int, int]]:
     h, w, _ = frame_tensor.shape
@@ -926,25 +1101,53 @@ def decode_data_frames_gpu(frame_batch: torch.Tensor, derived_params: Dict, tota
 def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optional[str], config: Dict, device: torch.device):
     logging.info(f"Starting decoding for '{input_path_str}'...")
     temp_dir = output_dir / TEMP_DECODE_DIR; temp_dir.mkdir(exist_ok=True)
-    video_path = Path(input_path_str)
-    if not video_path.exists(): logging.error(f"Input video not found: {video_path}"); return
+    raw_inputs = [segment.strip() for segment in input_path_str.split(',') if segment.strip()]
+    if not raw_inputs:
+        logging.error("No input video paths provided for decoding.")
+        return
+
+    video_paths = []
+    for segment in raw_inputs:
+        candidate = Path(segment).expanduser()
+        if not candidate.exists():
+            logging.error(f"Input video not found: {candidate}")
+            return
+        video_paths.append(candidate)
+
+    primary_video = video_paths[0]
+    multi_segment = len(video_paths) > 1
+    if multi_segment:
+        segment_lines = "\n".join(f"  [{idx+1}] {path}" for idx, path in enumerate(video_paths))
+        logging.info(f"Decoding will concatenate {len(video_paths)} segments:\n{segment_lines}")
+    else:
+        logging.info(f"Decoding single video: {primary_video}")
 
     # Extract barcode frame at full 720x720
-    barcode_frame = extract_frame_as_tensor(video_path, 0, temp_dir, config, frame_type='barcode')
+    barcode_frame = extract_frame_as_tensor(primary_video, 0, temp_dir, config, frame_type='barcode')
     if barcode_frame is None: logging.error("Failed to extract barcode frame."); return
     barcode_data = decode_barcode(barcode_frame)
     if barcode_data is None: return
     num_info_frames, _ = barcode_data
     
     # Extract info frames at 16x16 (INFO_K_SIDE)
-    info_frames = []
-    for i in range(num_info_frames):
-        frame = extract_frame_as_tensor(video_path, i + 1, temp_dir, config, frame_type='info')
-        if frame is None:
-            logging.error(f"Failed to extract info frame {i+1}. Aborting."); return
-        info_frames.append(frame)
-        
-    logging.info(f"Read {len(info_frames)} info frames from barcode ({num_info_frames} reported). Decoding them...")
+    if multi_segment:
+        info_reader = SegmentedDataFrameReader(video_paths, config, temp_dir, initial_frame_offset=1, frame_type='info')
+        info_frames_tensor = info_reader.fetch_frames(num_info_frames)
+        if info_frames_tensor is None or info_frames_tensor.shape[0] < num_info_frames:
+            logging.error("Failed to extract required info frames across provided segments.")
+            return
+        info_frames = info_frames_tensor[:num_info_frames]
+        logging.info(f"Read {info_frames.shape[0]} info frames from barcode ({num_info_frames} reported). Decoding them...")
+    else:
+        info_frames = []
+        for i in range(num_info_frames):
+            frame = extract_frame_as_tensor(primary_video, i + 1, temp_dir, config, frame_type='info')
+            if frame is None:
+                logging.error(f"Failed to extract info frame {i+1}. Aborting.")
+                return
+            info_frames.append(frame)
+        info_frames = torch.stack(info_frames)
+        logging.info(f"Read {info_frames.shape[0]} info frames from barcode ({num_info_frames} reported). Decoding them...")
     
     info_syndrome_table = build_syndrome_lookup_table(INFO_H_MATRIX_TENSOR.to(device))
     session_params = decode_info_frames(info_frames, device, info_syndrome_table)
@@ -999,7 +1202,8 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
         logging.info(f"[WARN] Calculated data_frame_count (fallback): {num_data_frames} frames")
     
     logging.info(f"Data extraction will process frames {frame_idx_offset} to {frame_idx_offset + num_data_frames - 1} (total {num_data_frames} data frames)")
-    
+
+    reader = SegmentedDataFrameReader(video_paths, config, temp_dir, frame_idx_offset, frame_type='data') if multi_segment else None
     batch_size = config['GPU_PROCESSOR_BATCH_SIZE']
     total_corrected_data_codewords = 0
     try:
@@ -1008,28 +1212,45 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
             start, end = i, min(i + batch_size, num_data_frames)
             logging.info(f"Processing data frame batch: logical indices {start+frame_idx_offset} to {end+frame_idx_offset-1} (frame_num offsets: {start} to {end-1})...")
             batch_count = end - start
-            batch_tensor_cpu = extract_data_frames_batch(video_path, frame_idx_offset + start, batch_count, config)
+            if reader is not None:
+                batch_tensor_cpu = reader.fetch_frames(batch_count)
 
-            if batch_tensor_cpu is None:
-                # Fallback to per-frame extraction if the batched path fails
-                frame_batch = []
-                for frame_num in range(start, end):
-                    actual_frame_index = frame_num + frame_idx_offset
-                    frame = extract_frame_as_tensor(video_path, actual_frame_index, temp_dir, config, frame_type='data')
-                    if frame is None:
-                        logging.warning(f"Could not extract data frame at index {actual_frame_index}. Filling with zeros.")
-                        frame = torch.zeros((config['DATA_K_SIDE'], config['DATA_K_SIDE'], 4), dtype=torch.uint8)
-                    frame_batch.append(frame)
-                if not frame_batch:
-                    break
-                batch_tensor_cpu = torch.stack(frame_batch)
-            else:
-                actual = batch_tensor_cpu.shape[0]
-                if actual < batch_count:
-                    deficit = batch_count - actual
-                    logging.warning(f"Padding {deficit} missing frame(s) after batched extraction.")
+                if batch_tensor_cpu is None or batch_tensor_cpu.shape[0] == 0:
+                    logging.warning("No more frames available across provided segments. Padding remaining frames with zeros.")
+                    batch_tensor_cpu = torch.zeros((batch_count, config['DATA_K_SIDE'], config['DATA_K_SIDE'], 4), dtype=torch.uint8)
+                elif batch_tensor_cpu.shape[0] < batch_count:
+                    deficit = batch_count - batch_tensor_cpu.shape[0]
+                    logging.warning(f"Recovered {batch_tensor_cpu.shape[0]} frame(s); padding remaining {deficit} with zeros.")
                     padding = torch.zeros((deficit, config['DATA_K_SIDE'], config['DATA_K_SIDE'], 4), dtype=torch.uint8)
                     batch_tensor_cpu = torch.cat((batch_tensor_cpu, padding), dim=0)
+            else:
+                batch_tensor_cpu = extract_frames_batch(
+                    primary_video,
+                    frame_idx_offset + start,
+                    batch_count,
+                    config,
+                    frame_type='data'
+                )
+
+                if batch_tensor_cpu is None:
+                    frame_batch = []
+                    for frame_num in range(start, end):
+                        actual_frame_index = frame_num + frame_idx_offset
+                        frame = extract_frame_as_tensor(primary_video, actual_frame_index, temp_dir, config, frame_type='data')
+                        if frame is None:
+                            logging.warning(f"Could not extract data frame at index {actual_frame_index}. Filling with zeros.")
+                            frame = torch.zeros((config['DATA_K_SIDE'], config['DATA_K_SIDE'], 4), dtype=torch.uint8)
+                        frame_batch.append(frame)
+                    if not frame_batch:
+                        break
+                    batch_tensor_cpu = torch.stack(frame_batch)
+                else:
+                    actual = batch_tensor_cpu.shape[0]
+                    if actual < batch_count:
+                        deficit = batch_count - actual
+                        logging.warning(f"Padding {deficit} missing frame(s) after batched extraction.")
+                        padding = torch.zeros((deficit, config['DATA_K_SIDE'], config['DATA_K_SIDE'], 4), dtype=torch.uint8)
+                        batch_tensor_cpu = torch.cat((batch_tensor_cpu, padding), dim=0)
 
             batch_tensor = batch_tensor_cpu.to(device)
             bits_per_frame_encoded = derived_params['total_encoded_bits_to_store_data']
@@ -1420,10 +1641,47 @@ def run_test_suite():
         failed_tests.append("Large Data 100KB")
 
 
-    # --- Test 4: Full Round Trip ---
+    # --- Test 4: Password-Protected Full Round Trip ---
     with tempfile.TemporaryDirectory() as tempdir:
         try:
-            logging.info("--- Test 4: Full Encode/Decode Round Trip (180x180 frames) ---")
+            logging.info("--- Test 4: Password-Protected Full Encode/Decode Round Trip ---")
+            temp_path = Path(tempdir)
+
+            # Create a test file
+            original_file = temp_path / "secret_test_file.txt"
+            test_content = ("Encrypted pipeline validation. " * 50).encode("utf-8")
+            original_file.write_bytes(test_content)
+
+            # Encode with password
+            config = load_config()
+            output_dir = temp_path / "output"
+            output_dir.mkdir()
+            encode_orchestrator(original_file, output_dir, "UltraSecret123!", config, device)
+
+            # Decode with the same password
+            video_file = output_dir / "secret_test_file_F2YT.mp4"
+            decode_dir = temp_path / "decoded"
+            decode_dir.mkdir()
+            decode_orchestrator(str(video_file), decode_dir, "UltraSecret123!", config, device)
+
+            # Verify
+            decoded_file = decode_dir / "Decoded_Files" / "secret_test_file.txt"
+            assert decoded_file.exists(), f"Decoded file not found at {decoded_file}"
+            assert filecmp.cmp(original_file, decoded_file, shallow=False), "Decoded file doesn't match original"
+            logging.info("PASS: Password-protected round trip succeeded. Decoded file matches original.")
+            passed_tests.append("Password Full Round Trip")
+        except AssertionError as e:
+            logging.error(f"FAIL: Password-protected round trip assertion failed: {e}")
+            failed_tests.append("Password Full Round Trip")
+        except Exception as e:
+            logging.error(f"FAIL: Password-protected round trip test failed. Error: {e}", exc_info=True)
+            failed_tests.append("Password Full Round Trip")
+
+
+    # --- Test 5: Full Round Trip (default single segment) ---
+    with tempfile.TemporaryDirectory() as tempdir:
+        try:
+            logging.info("--- Test 5: Encode/Decode Round Trip (default segmentation settings) ---")
             temp_path = Path(tempdir)
             
             # Create a test file
@@ -1434,15 +1692,31 @@ def run_test_suite():
 
             # Encode - use 180x180 frames (default config)
             config = load_config()
+            segmentation_test_enabled = os.getenv("F2YT_ENABLE_SEGMENT_TEST") == "1"
+            if segmentation_test_enabled:
+                override_value = int(os.getenv("F2YT_SEGMENT_OVERRIDE_FRAMES", "2"))
+                config["MAX_VIDEO_SEGMENT_FRAMES_OVERRIDE"] = max(1, override_value)
+                logging.info("   Segmentation override enabled for test via environment variable (F2YT_ENABLE_SEGMENT_TEST=1).")
+            else:
+                config.pop("MAX_VIDEO_SEGMENT_FRAMES_OVERRIDE", None)
+                logging.info("   Segmentation overrides disabled for default test run (single file focus).")
             output_dir = temp_path / "output"
             output_dir.mkdir()
             encode_orchestrator(original_file, output_dir, "testpass", config, device)
 
-            # Decode
-            video_file = output_dir / "test_file_F2YT.mp4"
+            # Locate produced MP4 segments (should be split because of the override)
+            mp4_parts = sorted(output_dir.glob("test_file_F2YT*.mp4"))
+            assert mp4_parts, "No MP4 output files produced by encoder"
+            if segmentation_test_enabled:
+                assert len(mp4_parts) >= 2, "Segment override expected multiple MP4 files"
+            else:
+                assert len(mp4_parts) == 1, "Default round trip test should produce a single MP4 segment"
+
+            # Decode using comma-separated list of segment paths
+            decode_input = ",".join(str(p) for p in mp4_parts)
             decode_dir = temp_path / "decoded"
             decode_dir.mkdir()
-            decode_orchestrator(str(video_file), decode_dir, "testpass", config, device)
+            decode_orchestrator(decode_input, decode_dir, "testpass", config, device)
 
             # Verify
             decoded_file = decode_dir / "Decoded_Files" / "test_file.txt"
