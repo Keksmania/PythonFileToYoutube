@@ -80,8 +80,8 @@ def load_config() -> Dict[str, Any]:
     default_config = {
         "FFMPEG_PATH": "ffmpeg", "SEVENZIP_PATH": "7z", "PAR2_PATH": "par2",
         "VIDEO_WIDTH": 720, "VIDEO_HEIGHT": 720, "VIDEO_FPS": 60,
-        "DATA_K_SIDE": 180, "NUM_COLORS_DATA": 4,
-        "PAR2_REDUNDANCY_PERCENT": 30, "X264_CRF": 30,
+        "DATA_K_SIDE": 180, "NUM_COLORS_DATA": 2,
+        "PAR2_REDUNDANCY_PERCENT": 10, "X264_CRF": 32,
         "CPU_PRODUCER_CHUNK_MB": 128, "GPU_PROCESSOR_BATCH_SIZE": 2048,
         "MAX_VIDEO_SEGMENT_HOURS": 11
     }
