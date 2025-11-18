@@ -81,7 +81,7 @@ The suite validates:
 | `VIDEO_FPS` | Frames per second (default 60). |
 | `DATA_K_SIDE` | Data frame size (default 180). |
 | `NUM_COLORS_DATA` | Palette size (power of two). |
-| `PAR2_REDUNDANCY_PERCENT` | PAR2 redundancy percentage (default 30). |
+| `PAR2_REDUNDANCY_PERCENT` | PAR2 redundancy percentage. |
 | `X264_CRF` | Quality parameter for x264 (lower = larger files). |
 | `CPU_PRODUCER_CHUNK_MB` | File chunk size for the producer thread. |
 | `GPU_PROCESSOR_BATCH_SIZE` | Number of frames processed per GPU batch. |
@@ -101,7 +101,6 @@ The suite validates:
 - **Dependency missing** – run the OS-specific dependency script; install any reported tool and rerun.
 - **CUDA unavailable** – confirm `nvidia-smi` works and that your PyTorch build reports `torch.cuda.is_available() == True`.
 - **FFmpeg errors** – inspect the log output (already printed). Ensure your `ffmpeg` build supports `libx264`.
-- **Segment naming** – the encoder now normalizes all files to end in `.mp4`; check permissions if renames fail.
 - **Decode issues** – verify that the info frame count matches (watch for warnings) and that you supply all segment files in order.
 
 ## Contributing
