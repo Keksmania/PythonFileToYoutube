@@ -380,8 +380,8 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
         return None
 
     redundancy = config["PAR2_REDUNDANCY_PERCENT"]
-    # Fixed 256KB block size (256 * 1024)
-    block_size = 262144
+    # Fixed 128KB block size (128 * 1024)
+    block_size = 131072
 
     logging.info(f"Creating PAR2 recovery files for {len(archive_files)} volume(s)...")
     
