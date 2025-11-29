@@ -181,10 +181,10 @@ def run_command(command: List[str], cwd: Optional[str] = None, stream_output: bo
     """
     logging.info(f"Running command: {shlex.join(command)}")
     try:
+        # input="" prevents tools like 7z from hanging on stdin prompts if arguments are wrong
         if stream_output:
             process = subprocess.run(command, check=False, cwd=cwd, text=True, input="")
         else:
-            # input="" prevents tools like 7z from hanging on stdin prompts if arguments are wrong
             process = subprocess.run(command, capture_output=True, text=True, check=False, cwd=cwd, input="")
         
         if not stream_output:
@@ -1456,6 +1456,7 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
     temp_dir = output_dir / TEMP_DECODE_DIR; temp_dir.mkdir(exist_ok=True)
     data_writer: Optional[DataWriterThread] = None
     should_cleanup = True # Default to cleanup
+    decoding_successful = False # Track overall success
 
     try:
         raw_inputs = [segment.strip() for segment in input_path_str.split(',') if segment.strip()]
@@ -1742,6 +1743,7 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
             final_extraction_dir = output_dir / "Decoded_Files"
             final_extraction_dir.mkdir(exist_ok=True)
             current_password = password
+            
             while True:
                 cmd = [sz_path, "x", "-y", f"-o{final_extraction_dir}", str(main_archive)]
                 if current_password:
@@ -1749,6 +1751,7 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                 
                 if run_command(cmd, cwd=str(data_output_dir)):
                     logging.info(f"Extraction successful. Files are in '{final_extraction_dir}'")
+                    decoding_successful = True
                     break
                 
                 # Handle failure (wrong password, etc.)
@@ -1767,19 +1770,34 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                     elif choice == 'k':
                         logging.warning("User cancelled extraction. Keeping temporary files.")
                         should_cleanup = False
+                        decoding_successful = False
                         break
                     else: # Default to cleanup (c)
                         logging.warning("User cancelled extraction. Cleaning up.")
+                        decoding_successful = False
                         break
                 else:
                     logging.error("Extraction failed for a non-password protected archive.")
+                    decoding_successful = False
                     break
         else:
             logging.error("Could not find the main archive file for extraction.")
 
-        logging.info("Decoding process completed.")
-        decode_elapsed = time.perf_counter() - decode_start
-        logging.info(f"Decoding completed successfully in {decode_elapsed:.1f}s ({decode_elapsed/60:.2f} min).")
+        if decoding_successful:
+            logging.info("Decoding process completed successfully.")
+            decode_elapsed = time.perf_counter() - decode_start
+            logging.info(f"Decoding completed in {decode_elapsed:.1f}s ({decode_elapsed/60:.2f} min).")
+        else:
+            logging.error("Decoding process was aborted or failed.")
+            # If failed, remove the target directory to avoid confusion (if empty)
+            if 'final_extraction_dir' in locals() and final_extraction_dir.exists():
+                try:
+                    
+                    if not any(final_extraction_dir.iterdir()):
+                         final_extraction_dir.rmdir()
+                except Exception as e:
+                    logging.debug(f"Could not remove failed extraction dir: {e}")
+
     finally:
         if should_cleanup:
             cleanup_temp_dir(temp_dir, "decoding temp")
