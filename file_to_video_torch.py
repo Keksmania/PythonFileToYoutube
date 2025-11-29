@@ -90,15 +90,15 @@ def load_config() -> Dict[str, Any]:
         "FFMPEG_PATH": "ffmpeg", "SEVENZIP_PATH": "7z", "PAR2_PATH": "par2",
         "VIDEO_WIDTH": 720, "VIDEO_HEIGHT": 720, "VIDEO_FPS": 60,
         "DATA_K_SIDE": 180, "NUM_COLORS_DATA": 2,
-        "PAR2_REDUNDANCY_PERCENT": 5, "X264_CRF": 40,
-        "KEYINT_MAX": 2,
+        "PAR2_REDUNDANCY_PERCENT": 5, "X264_CRF": 30,
+        "KEYINT_MAX": 1,
         "CPU_PRODUCER_CHUNK_MB": 128, 
-        "GPU_PROCESSOR_BATCH_SIZE": 1024,
+        "GPU_PROCESSOR_BATCH_SIZE": 512,
         "MAX_VIDEO_SEGMENT_HOURS": 11,
         "GPU_OVERLAP_STREAMS": 8,
         "PIPELINE_QUEUE_DEPTH": 64, 
         "CPU_WORKER_THREADS": 2,
-        "ENABLE_NVENC": False
+        "ENABLE_NVENC": True
     }
     if not config_path.exists():
         logging.info(f"Config file not found. Creating default at '{config_path}'")
