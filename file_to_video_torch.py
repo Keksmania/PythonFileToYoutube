@@ -92,12 +92,13 @@ def load_config() -> Dict[str, Any]:
         "DATA_K_SIDE": 180, "NUM_COLORS_DATA": 2,
         "PAR2_REDUNDANCY_PERCENT": 5, "X264_CRF": 40,
         "KEYINT_MAX": 2,
-        "CPU_PRODUCER_CHUNK_MB": 128,
+        "CPU_PRODUCER_CHUNK_MB": 128, 
         "GPU_PROCESSOR_BATCH_SIZE": 1024,
         "MAX_VIDEO_SEGMENT_HOURS": 11,
         "GPU_OVERLAP_STREAMS": 8,
-        "PIPELINE_QUEUE_DEPTH": 64, # Increased default for smoother graph
-        "CPU_WORKER_THREADS": 2 
+        "PIPELINE_QUEUE_DEPTH": 64, 
+        "CPU_WORKER_THREADS": 2,
+        "ENABLE_NVENC": False
     }
     if not config_path.exists():
         logging.info(f"Config file not found. Creating default at '{config_path}'")
@@ -511,10 +512,6 @@ def generate_info_artifacts(file_manifest: Dict, config: Dict, device: torch.dev
     result_frames = torch.stack(all_frames)
     logging.info(f"Generated {final_frame_count} info frames. Result tensor shape: {result_frames.shape}")
     
-    # DIAGNOSTIC: Verify the count matches what we calculated
-    if result_frames.shape[0] != final_frame_count:
-        logging.error(f"ERROR: Generated {result_frames.shape[0]} frames but calculated {final_frame_count}!")
-    
     return result_frames
 
 def encode_data_frames_gpu(bits_tensor_gpu: torch.Tensor, derived_params: Dict) -> torch.Tensor:
@@ -712,15 +709,39 @@ class FFmpegConsumerThread(threading.Thread):
         fps = self.config["VIDEO_FPS"]
         keyint = self.config.get("KEYINT_MAX", 1)
         
-        # FIX: Explicitly enforce output resolution via filters.
+        # Explicitly enforce output resolution via filters.
+        # libx264 often enforces mod-16 dimensions by default if not told otherwise.
+        # We also enforce yuv420p for standard H.264 compatibility.
+        
+        # GPU Encoding Switch
+        if self.config.get("ENABLE_NVENC", False):
+            # GPU Settings (h264_nvenc)
+            logging.info(f"Using GPU Encoding (h264_nvenc) with CRF/CQ={crf}")
+            codec_args = [
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p1',      # Fastest preset
+                '-rc', 'vbr',         # Variable Bitrate to allow quality focus
+                '-cq', str(crf),      # Constant Quality
+                '-spatial-aq', '1',   # Help retain spatial details (edges)
+                '-temporal-aq', '1'   
+            ]
+        else:
+            # CPU Settings (libx264)
+            logging.info(f"Using CPU Encoding (libx264) with CRF={crf}")
+            codec_args = [
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-tune', 'stillimage',
+                '-crf', str(crf),
+            ]
+
         self.ffmpeg_command_base = [
             self.config["FFMPEG_PATH"], '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}', '-pix_fmt', 'rgb24', '-r', str(fps), '-i', '-',
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage',
+            *codec_args,
             '-g', str(keyint),
             '-keyint_min', str(keyint),
             '-sc_threshold', '0',
-            '-crf', str(crf),
             '-vf', f'scale={width}:{height}', 
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart'
@@ -956,14 +977,21 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         logging.info(f"Original Input: {input_path}")
         logging.info(f"Total Payload Size (after 7z/par2): {total_payload_size / 1024:.2f} KB")
         logging.info("Output Video Files:")
+        
+        total_video_size = 0
         for video_file in produced_files:
             if video_file.exists():
                 video_size = video_file.stat().st_size
+                total_video_size += video_size
                 logging.info(f"  - {video_file} ({video_size / (1024*1024):.2f} MB)")
-                if total_payload_size > 0:
-                    logging.info(f"    Storage Ratio: {video_size / total_payload_size:.2f}")
             else:
                 logging.info(f"  - {video_file} (missing on disk)")
+        
+        if total_payload_size > 0:
+             ratio = total_video_size / total_payload_size
+             logging.info(f"Total Video Size: {total_video_size / (1024*1024):.2f} MB")
+             logging.info(f"Overall Storage Ratio: {ratio:.2f}x (Video is {ratio:.2f} times larger than payload)")
+
         encode_elapsed = time.perf_counter() - encode_start
         logging.info(f"Encoding completed successfully in {encode_elapsed:.1f}s ({encode_elapsed/60:.2f} min).")
     finally:
@@ -1025,7 +1053,11 @@ class DataWriterThread(threading.Thread):
     def stop(self): self.stop_event.set()
 
 def extract_frame_as_tensor(video_path: Path, frame_index: int, temp_dir: Path, config: Dict, frame_type: str = 'data') -> Optional[torch.Tensor]:
-    """Extract a specific frame from video using frame-accurate seeking."""
+    """Extract a specific frame from video using frame-accurate seeking.
+    
+    frame_type: 'barcode' (720x720), 'info' (16x16), or 'data' (180x180)
+    Extracts at the appropriate resolution for each frame type to preserve color precision.
+    """
     ffmpeg_path = config["FFMPEG_PATH"]
     fps = config.get("VIDEO_FPS", 60)
     
@@ -1746,14 +1778,8 @@ def main():
     parser.add_argument("-input", required=False, help="Input file/folder (encode) or video file(s) (decode).")
     parser.add_argument("-output", help="Output directory. Defaults to a subdirectory next to the input.")
     parser.add_argument("-p", "--password", help="Password for archive creation/extraction.")
-    parser.add_argument("-test", action='store_true', help="Run the internal test suite.")
     
     args = parser.parse_args()
-
-    if args.test:
-        setup_logging(level=logging.INFO) # Use INFO for test suite for cleaner output
-        run_test_suite()
-        return
 
     # If not testing, mode and input are required
     if not args.mode or not args.input:
@@ -1766,8 +1792,21 @@ def main():
         device = setup_pytorch()
         input_path_str = args.input
         
-        if args.output: output_dir = Path(args.output).resolve()
-        else: output_dir = Path(input_path_str).resolve().parent / f"{Path(input_path_str).stem}_F2YT_Output"
+        # Handle comma-separated inputs for default output directory calculation
+        if "," in input_path_str:
+            # Take the first file path to determine the default output directory
+            # We strip whitespace to handle "file1, file2"
+            first_input_str = input_path_str.split(",")[0].strip()
+            reference_path = Path(first_input_str).resolve()
+        else:
+            reference_path = Path(input_path_str).resolve()
+
+        if args.output: 
+            output_dir = Path(args.output).resolve()
+        else: 
+            # Create output dir based on the reference path (first input file)
+            output_dir = reference_path.parent / f"{reference_path.stem}_F2YT_Output"
+        
         output_dir.mkdir(exist_ok=True)
         logging.info(f"Output will be saved to: {output_dir}")
         
@@ -1779,413 +1818,6 @@ def main():
     except Exception as e:
         logging.error(f"A critical error occurred: {e}", exc_info=True)
         sys.exit(1)
-
-# --- Test Suite ---
-
-def run_test_suite():
-    """Runs a series of tests to verify the core functionality of the script."""
-    logging.info("="*20 + " RUNNING TEST SUITE " + "="*20)
-    passed_tests = []
-    failed_tests = []
-    device = setup_pytorch()
-    
-    # Set to INFO to show diagnostic logs but suppress DEBUG noise
-    logging.getLogger().setLevel(logging.INFO)
-
-    # --- Test 1: Hamming Codec ---
-    try:
-        logging.info("--- Test 1: Hamming Codec Integrity ---")
-        original_data = torch.tensor([1,0,1,1], dtype=torch.uint8, device=device)
-        g_matrix = INFO_G_MATRIX_TENSOR.to(device)
-        h_matrix = INFO_H_MATRIX_TENSOR.to(device)
-        syndrome_table = build_syndrome_lookup_table(h_matrix)
-
-        encoded = (torch.matmul(original_data.float(), g_matrix.float()) % 2).to(torch.uint8)
-        corrupted = encoded.clone()
-        corrupted[2] = 1 - corrupted[2] # Flip the 3rd bit
-
-        decoded, corrections = hamming_decode_gpu(corrupted.unsqueeze(0), h_matrix, INFO_HAMMING_K, syndrome_table)
-        
-        assert corrections == 1
-        assert torch.equal(original_data, decoded)
-        logging.info("PASS: Hamming codec correctly encoded, corrupted, and recovered data.")
-        passed_tests.append("Hamming Codec")
-    except Exception as e:
-        logging.error(f"FAIL: Hamming Codec test failed. Error: {e}", exc_info=True)
-        failed_tests.append("Hamming Codec")
-
-    # --- Test 2: Pixel Conversion Round Trip ---
-    try:
-        logging.info("--- Test 2: Pixel Conversion Round Trip ---")
-        original_bits = torch.randint(0, 2, (INFO_K_SIDE * INFO_K_SIDE * INFO_BITS_PER_PALETTE_COLOR,), device=device, dtype=torch.uint8)
-        frame = tensor_to_frame(original_bits, INFO_K_SIDE, INFO_COLOR_PALETTE_TENSOR, INFO_BITS_PER_PALETTE_COLOR)
-        recovered_bits = frame_to_bits_batch(frame.unsqueeze(0), INFO_COLOR_PALETTE_TENSOR, INFO_BITS_PER_PALETTE_COLOR)
-        assert torch.equal(original_bits, recovered_bits)
-        logging.info("PASS: Pixel to Bit to Pixel conversion is consistent.")
-        passed_tests.append("Pixel Conversion")
-    except Exception as e:
-        logging.error(f"FAIL: Pixel Conversion test failed. Error: {e}", exc_info=True)
-        failed_tests.append("Pixel Conversion")
-
-    # --- Test 3: Info Block Protocol ---
-    try:
-        logging.info("--- Test 3: Info Block Protocol Integrity ---")
-        config = load_config()
-        manifest = {"file_manifest_detailed": [{"name": "test.txt", "size": 123, "type": "sz_vol"}]}
-        
-        # 1. Encode in-memory
-        info_frames_batch = generate_info_artifacts(manifest, config, device)
-        assert info_frames_batch is not None and info_frames_batch.numel() > 0
-        
-        logging.info(f"   Generated {info_frames_batch.shape[0]} info frames at {INFO_K_SIDE}x{INFO_K_SIDE}")
-
-        # 2. Simulate video upscaling (frames are encoded at INFO_K_SIDE but extracted at VIDEO_RES)
-        video_height, video_width = config['VIDEO_HEIGHT'], config['VIDEO_WIDTH']
-        upscaled_frames = torch.nn.functional.interpolate(
-            info_frames_batch.permute(0, 3, 1, 2).float(), 
-            size=(video_height, video_width), 
-            mode='nearest'
-        ).permute(0, 2, 3, 1).byte()
-        
-        logging.info(f"   Upscaled to {video_height}x{video_width} to simulate video extraction")
-
-        # 3. Decode from the upscaled (realistic) frames
-        # decode_info_frames will automatically downscale them back to INFO_K_SIDE
-        recovered_json = decode_info_frames(upscaled_frames, device)
-        
-        assert recovered_json is not None, "Failed to decode JSON from upscaled frames"
-        assert recovered_json["file_manifest_detailed"][0]["name"] == "test.txt", "Manifest mismatch in decoded JSON"
-        logging.info("PASS: Info block protocol round trip is successful.")
-        passed_tests.append("Info Block Protocol")
-
-    except Exception as e:
-        logging.error(f"FAIL: Info Block Protocol test failed. Error: {e}", exc_info=True)
-        failed_tests.append("Info Block Protocol")
-
-
-    # --- Test 3.5: Data Frame Hamming(7,4) with 32x32 ---
-    try:
-        logging.info("--- Test 3.5: Data Frame Hamming(7,4) Protocol (32x32) ---")
-        config = load_config()
-        
-        # Test 3.5a: Direct Hamming codec test (no frames)
-        logging.info("   Test 3.5a: Direct Hamming(7,4) codec (no frames)")
-        hamming_k = DATA_HAMMING_K
-        hamming_n = DATA_HAMMING_N
-        g_matrix = DATA_G_MATRIX_TENSOR.to(device).float()
-        h_matrix = DATA_H_MATRIX_TENSOR.to(device)
-        
-        # Create known test data: 26 data bits per codeword
-        test_data_bits = torch.tensor([i % 2 for i in range(hamming_k * 5)], dtype=torch.uint8, device=device)
-        data_chunks = test_data_bits.view(-1, hamming_k)
-        
-        # Encode
-        encoded_chunks = (torch.matmul(data_chunks.float(), g_matrix) % 2).to(torch.uint8)
-        encoded_bits_flat = encoded_chunks.view(-1)
-        
-        logging.info(f"   Encoded {data_chunks.shape[0]} Hamming blocks ({encoded_bits_flat.numel()} coded bits)")
-        
-        # Decode WITHOUT corruption first
-        syndrome_table = build_syndrome_lookup_table(h_matrix)
-        decoded_bits, num_corrections = hamming_decode_gpu(encoded_bits_flat, h_matrix, hamming_k, syndrome_table)
-        
-        logging.info(f"   Direct decode: {num_corrections} errors, {decoded_bits.numel()} data bits")
-        
-        if torch.equal(decoded_bits, test_data_bits):
-            logging.info("   [OK] Direct Hamming(7,4) works (no corruption)")
-        else:
-            mismatch = (decoded_bits != test_data_bits).sum().item()
-            logging.error(f"   [FAIL] Direct Hamming FAILED: {mismatch} mismatches with no corruption!")
-            failed_tests.append("Data Frame 32x32 Hamming")
-            return  # Early exit since Hamming is broken
-        
-        # Test 3.5b: Pixel round-trip WITHOUT upscaling
-        logging.info("   Test 3.5b: Pixel conversion round-trip (32x32, no upscaling)")
-        test_k_side = 32
-        test_bits_per_color = int(math.log2(4))
-        test_pixels = test_k_side * test_k_side
-        test_bits_for_frame = test_pixels * test_bits_per_color
-        
-        test_bits = torch.tensor([i % 2 for i in range(test_bits_for_frame)], dtype=torch.uint8, device=device)
-        palette_4color = generate_palette_tensor(4, device)
-        
-        # Create frame at 32x32 (encoding resolution)
-        frame_32x32 = tensor_to_frame(test_bits, test_k_side, palette_4color, test_bits_per_color)
-        
-        # Extract bits directly from 32x32 frame (no upscaling)
-        recovered_bits = frame_to_bits_batch(frame_32x32.unsqueeze(0), palette_4color, test_bits_per_color)
-        
-        if torch.equal(test_bits, recovered_bits):
-            logging.info(f"   [OK] Pixel round-trip works at 32x32 ({test_bits.numel()} bits preserved)")
-        else:
-            mismatch = (test_bits != recovered_bits).sum().item()
-            logging.error(f"   [FAIL] Pixel round-trip FAILED: {mismatch} bit mismatches at 32x32")
-            failed_tests.append("Data Frame 32x32 Hamming")
-            return  # Early exit since pixel conversion is broken
-        
-        # Test 3.5c: Full Hamming + Frame round-trip WITHOUT upscaling (upscaling is video codec concern)
-        logging.info("   Test 3.5c: Full round-trip at native 32x32 (Hamming + frame conversion)")
-        
-        # Encode bits to Hamming
-        test_bits_padded = test_bits.clone()
-        rem = test_bits_padded.numel() % hamming_k
-        if rem != 0:
-            pad_n = hamming_k - rem
-            test_bits_padded = torch.cat((test_bits_padded, torch.zeros(pad_n, dtype=torch.uint8, device=device)))
-        
-        data_chunks = test_bits_padded.view(-1, hamming_k)
-        encoded_chunks = (torch.matmul(data_chunks.float(), g_matrix) % 2).to(torch.uint8)
-        encoded_bits = encoded_chunks.view(-1)
-        
-        # Create frame from encoded bits at 32x32
-        frame_32x32 = tensor_to_frame(encoded_bits, test_k_side, palette_4color, test_bits_per_color)
-        
-        # DEBUG: Check frame colors
-        unique_colors = torch.unique(frame_32x32.view(-1, frame_32x32.shape[-1]), dim=0)
-        logging.info(f"   Frame colors ({len(unique_colors)} unique): {unique_colors.cpu().numpy().tolist()}")
-        
-        # Extract bits directly from 32x32 frame (NO upscaling - that's a video codec concern, not Hamming concern)
-        recovered_bits = frame_to_bits_batch(frame_32x32.unsqueeze(0), palette_4color, test_bits_per_color)
-        
-        # Pad to Hamming blocks
-        rem = recovered_bits.numel() % hamming_n
-        if rem != 0:
-            pad_n = hamming_n - rem
-            recovered_bits = torch.cat((recovered_bits, torch.zeros(pad_n, dtype=torch.uint8, device=device)))
-        
-        # Decode
-        decoded_bits, num_corrections = hamming_decode_gpu(recovered_bits, h_matrix, hamming_k, syndrome_table)
-        
-        # Verify
-        expected = test_bits_padded[:decoded_bits.numel()]
-        if torch.equal(decoded_bits, expected):
-            logging.info("PASS: 32x32 data frame Hamming round trip successful!")
-            passed_tests.append("Data Frame 32x32 Hamming")
-        else:
-            mismatch_count = (decoded_bits != expected).sum().item()
-            # Allow up to a small number of mismatches - PAR2 will correct them
-            if mismatch_count <= 2:
-                logging.info(f"PASS: 32x32 data frame Hamming round trip with {mismatch_count} residual bit(s) (PAR2 will correct)")
-                passed_tests.append("Data Frame 32x32 Hamming")
-            else:
-                logging.error(f"FAIL: {mismatch_count} bit mismatches in final decoded data")
-                failed_tests.append("Data Frame 32x32 Hamming")
-        
-    except Exception as e:
-        logging.error(f"FAIL: Data Frame 32x32 Hamming test failed. Error: {e}", exc_info=True)
-        failed_tests.append("Data Frame 32x32 Hamming")
-
-
-    # --- Test 3.6: Large Data Encoding with 32x32 Frames (100KB) ---
-    try:
-        logging.info("--- Test 3.6: Large Data Encoding (100KB with 32x32 Frames) ---")
-        config = load_config()
-        
-        # Generate 100KB of test data
-        test_data_size = 100 * 1024  # 100 KB
-        large_test_data = torch.randint(0, 2, (test_data_size * 8,), dtype=torch.uint8, device=device)
-        
-        logging.info(f"   Generated {test_data_size} bytes ({test_data_size * 8} bits) of random test data")
-        
-        # Setup Hamming encoding
-        hamming_k = DATA_HAMMING_K
-        hamming_n = DATA_HAMMING_N
-        g_matrix = DATA_G_MATRIX_TENSOR.to(device).float()
-        h_matrix = DATA_H_MATRIX_TENSOR.to(device)
-        syndrome_table = build_syndrome_lookup_table(h_matrix)
-        
-        # Pad data to Hamming blocks
-        test_bits_padded = large_test_data.clone()
-        rem = test_bits_padded.numel() % hamming_k
-        if rem != 0:
-            pad_n = hamming_k - rem
-            test_bits_padded = torch.cat((test_bits_padded, torch.zeros(pad_n, dtype=torch.uint8, device=device)))
-        
-        # Hamming encode
-        data_chunks = test_bits_padded.view(-1, hamming_k)
-        encoded_chunks = (torch.matmul(data_chunks.float(), g_matrix) % 2).to(torch.uint8)
-        encoded_bits = encoded_chunks.view(-1)
-        
-        logging.info(f"   Hamming encoded {data_chunks.shape[0]} blocks ({encoded_bits.numel()} coded bits)")
-        
-        # Setup frame parameters for 32x32
-        test_k_side = 32
-        test_bits_per_color = int(math.log2(4))
-        test_pixels = test_k_side * test_k_side
-        test_bits_per_frame = test_pixels * test_bits_per_color
-        palette_4color = generate_palette_tensor(4, device)
-        
-        # Calculate how many frames we need
-        num_frames_needed = (encoded_bits.numel() + test_bits_per_frame - 1) // test_bits_per_frame
-        logging.info(f"   Need {num_frames_needed} frames of {test_k_side}x{test_k_side} to store {encoded_bits.numel()} bits")
-        
-        # Pad encoded bits to fill complete frames
-        total_bits_needed = num_frames_needed * test_bits_per_frame
-        if encoded_bits.numel() < total_bits_needed:
-            pad_n = total_bits_needed - encoded_bits.numel()
-            encoded_bits = torch.cat((encoded_bits, torch.zeros(pad_n, dtype=torch.uint8, device=device)))
-        
-        # Create frames
-        all_frames = []
-        for frame_idx in range(num_frames_needed):
-            frame_bits = encoded_bits[frame_idx * test_bits_per_frame:(frame_idx + 1) * test_bits_per_frame]
-            frame = tensor_to_frame(frame_bits, test_k_side, palette_4color, test_bits_per_color)
-            all_frames.append(frame)
-        
-        frames_tensor = torch.stack(all_frames)
-        logging.info(f"   Created {num_frames_needed} frames at {test_k_side}x{test_k_side}")
-        
-        # Extract bits back from frames
-        recovered_bits = frame_to_bits_batch(frames_tensor, palette_4color, test_bits_per_color)
-        
-        # Verify frame round-trip before Hamming decode
-        if recovered_bits.numel() >= encoded_bits.numel():
-            bit_diff = (recovered_bits[:encoded_bits.numel()] != encoded_bits).sum().item()
-            bit_error_rate = bit_diff / encoded_bits.numel() * 100 if encoded_bits.numel() > 0 else 0
-            logging.info(f"   Frame round-trip: {bit_diff}/{encoded_bits.numel()} bits differ ({bit_error_rate:.4f}% BER)")
-        
-        # Pad to Hamming blocks
-        rem = recovered_bits.numel() % hamming_n
-        if rem != 0:
-            pad_n = hamming_n - rem
-            recovered_bits = torch.cat((recovered_bits, torch.zeros(pad_n, dtype=torch.uint8, device=device)))
-        
-        # Hamming decode
-        decoded_bits, num_corrections = hamming_decode_gpu(recovered_bits, h_matrix, hamming_k, syndrome_table)
-        
-        logging.info(f"   Hamming decoded: {num_corrections} codewords corrected, recovered {decoded_bits.numel()} data bits")
-        
-        # Verify
-        expected = test_bits_padded[:decoded_bits.numel()]
-        if torch.equal(decoded_bits, expected):
-            logging.info("PASS: 100KB large data test successful (0 bit mismatches)!")
-            passed_tests.append("Large Data 100KB")
-        else:
-            mismatch_indices = torch.where(decoded_bits != expected)[0]
-            mismatch_count = len(mismatch_indices)
-            mismatch_rate = mismatch_count / decoded_bits.numel() * 100 if decoded_bits.numel() > 0 else 0
-            
-            # Allow residual errors for PAR2 to handle
-            if mismatch_count <= 100:
-                logging.info(f"PASS: 100KB large data test with {mismatch_count} residual bits ({mismatch_rate:.4f}% error rate, PAR2 will correct)")
-                passed_tests.append("Large Data 100KB")
-            else:
-                logging.error(f"FAIL: {mismatch_count} bit mismatches in 100KB test ({mismatch_rate:.4f}% error rate)")
-                # Show first 10 mismatches
-                for i, idx in enumerate(mismatch_indices[:10]):
-                    logging.error(f"  Mismatch {i}: bit {idx.item()}, got {decoded_bits[idx].item()}, expected {expected[idx].item()}")
-                failed_tests.append("Large Data 100KB")
-        
-    except Exception as e:
-        logging.error(f"FAIL: Large Data 100KB test failed. Error: {e}", exc_info=True)
-        failed_tests.append("Large Data 100KB")
-
-
-    # --- Test 4: Password-Protected Full Round Trip ---
-    with tempfile.TemporaryDirectory() as tempdir:
-        try:
-            logging.info("--- Test 4: Password-Protected Full Encode/Decode Round Trip ---")
-            temp_path = Path(tempdir)
-
-            # Create a test file
-            original_file = temp_path / "secret_test_file.txt"
-            test_content = ("Encrypted pipeline validation. " * 50).encode("utf-8")
-            original_file.write_bytes(test_content)
-
-            # Encode with password
-            config = load_config()
-            output_dir = temp_path / "output"
-            output_dir.mkdir()
-            encode_orchestrator(original_file, output_dir, "UltraSecret123!", config, device)
-
-            # Decode with the same password
-            video_file = output_dir / "secret_test_file_F2YT.mp4"
-            decode_dir = temp_path / "decoded"
-            decode_dir.mkdir()
-            decode_orchestrator(str(video_file), decode_dir, "UltraSecret123!", config, device)
-
-            # Verify
-            decoded_file = decode_dir / "Decoded_Files" / "secret_test_file.txt"
-            assert decoded_file.exists(), f"Decoded file not found at {decoded_file}"
-            assert filecmp.cmp(original_file, decoded_file, shallow=False), "Decoded file doesn't match original"
-            logging.info("PASS: Password-protected round trip succeeded. Decoded file matches original.")
-            passed_tests.append("Password Full Round Trip")
-        except AssertionError as e:
-            logging.error(f"FAIL: Password-protected round trip assertion failed: {e}")
-            failed_tests.append("Password Full Round Trip")
-        except Exception as e:
-            logging.error(f"FAIL: Password-protected round trip test failed. Error: {e}", exc_info=True)
-            failed_tests.append("Password Full Round Trip")
-
-
-    # --- Test 5: Full Round Trip (default single segment) ---
-    with tempfile.TemporaryDirectory() as tempdir:
-        try:
-            logging.info("--- Test 5: Encode/Decode Round Trip (default segmentation settings) ---")
-            temp_path = Path(tempdir)
-            
-            # Create a test file
-            original_file = temp_path / "test_file.txt"
-            test_content = b"Hello, world! This is the ultimate test of the file-to-video pipeline." * 100
-            with open(original_file, "wb") as f:
-                f.write(test_content)
-
-            # Encode - use 180x180 frames (default config)
-            config = load_config()
-            segmentation_test_enabled = os.getenv("F2YT_ENABLE_SEGMENT_TEST") == "1"
-            if segmentation_test_enabled:
-                override_value = int(os.getenv("F2YT_SEGMENT_OVERRIDE_FRAMES", "2"))
-                config["MAX_VIDEO_SEGMENT_FRAMES_OVERRIDE"] = max(1, override_value)
-                logging.info("   Segmentation override enabled for test via environment variable (F2YT_ENABLE_SEGMENT_TEST=1).")
-            else:
-                config.pop("MAX_VIDEO_SEGMENT_FRAMES_OVERRIDE", None)
-                logging.info("   Segmentation overrides disabled for default test run (single file focus).")
-            output_dir = temp_path / "output"
-            output_dir.mkdir()
-            encode_orchestrator(original_file, output_dir, "testpass", config, device)
-
-            # Locate produced MP4 segments (should be split because of the override)
-            mp4_parts = sorted(output_dir.glob("test_file_F2YT*.mp4"))
-            assert mp4_parts, "No MP4 output files produced by encoder"
-            if segmentation_test_enabled:
-                assert len(mp4_parts) >= 2, "Segment override expected multiple MP4 files"
-            else:
-                assert len(mp4_parts) == 1, "Default round trip test should produce a single MP4 segment"
-
-            # Decode using comma-separated list of segment paths
-            decode_input = ",".join(str(p) for p in mp4_parts)
-            decode_dir = temp_path / "decoded"
-            decode_dir.mkdir()
-            decode_orchestrator(decode_input, decode_dir, "testpass", config, device)
-
-            # Verify
-            decoded_file = decode_dir / "Decoded_Files" / "test_file.txt"
-            assert decoded_file.exists(), f"Decoded file not found at {decoded_file}"
-            assert filecmp.cmp(original_file, decoded_file, shallow=False), "Decoded file doesn't match original"
-            logging.info("PASS: Full round trip successful. Decoded file matches original.")
-            passed_tests.append("Full Round Trip")
-        except AssertionError as e:
-            logging.error(f"FAIL: Full Round Trip assertion failed: {e}")
-            failed_tests.append("Full Round Trip")
-        except Exception as e:
-            logging.error(f"FAIL: Full Round Trip test failed. Error: {e}", exc_info=True)
-            failed_tests.append("Full Round Trip")
-
-    # --- Final Report ---
-    logging.info("="*20 + " TEST SUITE SUMMARY " + "="*20)
-    logging.info(f"Passed: {len(passed_tests)}")
-    for test in passed_tests:
-        logging.info(f"  - {test}")
-    
-    if failed_tests:
-        logging.error(f"Failed: {len(failed_tests)}")
-        for test in failed_tests:
-            logging.error(f"  - {test}")
-    else:
-        logging.info("Failed: 0")
-
-    logging.info("="*58)
-
 
 if __name__ == "__main__":
     main()
