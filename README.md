@@ -1,7 +1,9 @@
 # PythonFileToYoutube
 
-Turn any file or folder into one or more MP4 videos (and back again) using PyTorch, 7-Zip, PAR2, FFmpeg
+Turn any file or folder into one or more MP4 videos (and back again) using the file_to_video_torch.py script provided in this repo.
 The script is optimized for youtube. Meaning the default config is good enough that a file should be able to survice a full round trip to youtube and back. 
+
+The software has a CLI.
 
 
 ## Features
