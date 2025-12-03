@@ -66,7 +66,7 @@ DATA_H_MATRIX_TENSOR = torch.tensor([
 # --- Setup and Configuration ---
 
 def setup_logging(level=logging.INFO):
-    logging.basicConfig(level=level, format="[%(levelname)s] %(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", stream=sys.stdout)
+    logging.basicConfig(level=level, format="[%(levelname)s] %(asctime)s - %(message)s", datefmt="%H:%M:%S", stream=sys.stdout)
 
 def setup_pytorch() -> torch.device:
     if torch.cuda.is_available():
@@ -182,6 +182,58 @@ def sanitize_filename(name: str) -> str:
     # Keep only a-z, A-Z, 0-9, ., _, -
     return re.sub(r'[^a-zA-Z0-9\._-]', '', name)
 
+# --- UI Helper Classes ---
+
+class ConsoleProgressBar(threading.Thread):
+    """
+    Thread that updates a progress bar and spinner on the same line.
+    """
+    def __init__(self, total: int, prefix: str = "Processing"):
+        super().__init__(daemon=True)
+        self.total = total
+        self.current = 0
+        self.prefix = prefix
+        self.stop_event = threading.Event()
+        self.start_time = time.time()
+        self.spin_chars = "|/-\\"
+        self.spin_idx = 0
+        self.bar_length = 30
+
+    def update(self, amount: int):
+        self.current += amount
+
+    def run(self):
+        while not self.stop_event.is_set():
+            self._print_bar()
+            time.sleep(0.1)
+        # Print 100% state
+        self._print_bar()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def _print_bar(self):
+        if self.total > 0:
+            percent = min(100.0, (self.current / self.total) * 100.0)
+            filled_length = int(self.bar_length * self.current // self.total)
+            filled_length = min(self.bar_length, filled_length)
+        else:
+            percent = 0.0
+            filled_length = 0
+
+        bar = "#" * filled_length + "-" * (self.bar_length - filled_length)
+        spinner = self.spin_chars[self.spin_idx % len(self.spin_chars)]
+        self.spin_idx += 1
+
+        elapsed = time.time() - self.start_time
+        rate = self.current / elapsed if elapsed > 0 else 0
+        
+        sys.stdout.write(f"\r{self.prefix} [{bar}] {percent:.1f}% | {spinner} | Rate: {rate:.2f} units/s")
+        sys.stdout.flush()
+
+    def stop(self):
+        self.stop_event.set()
+        self.join()
+
 # --- Core Utility Functions ---
 
 def run_command(command: List[str], cwd: Optional[str] = None, stream_output: bool = False) -> bool:
@@ -225,7 +277,6 @@ def tensor_to_frame(bits_tensor: torch.Tensor, k_side: int, palette: torch.Tenso
     required_bits = num_pixels * bits_per_color
     if bits_tensor.numel() < required_bits:
         pad_n = required_bits - bits_tensor.numel()
-        logging.debug(f"tensor_to_frame: padding {pad_n} bits (required {required_bits}, got {bits_tensor.numel()})")
         padding = torch.zeros(pad_n, dtype=torch.uint8, device=device)
         bits_tensor = torch.cat((bits_tensor, padding))
     bits_for_frame = bits_tensor[:required_bits]
@@ -297,9 +348,6 @@ def frame_to_bits_batch(frame_batch: torch.Tensor, palette: torch.Tensor, bits_p
     for i in range(bits_per_color - 1, -1, -1):
         unpacked_bits.append((indices >> i) & 1)
     result = torch.stack(unpacked_bits, dim=1).view(-1).to(torch.uint8)
-    # Diagnostic: report counts and small sample of bits at INFO level
-    total_bits = result.numel()
-    logging.info(f"frame_to_bits_batch: extracted {total_bits} bits from {num_frames} frames ({h}x{w}), bits_per_color={bits_per_color}")
     return result
 
 
@@ -324,13 +372,6 @@ def hamming_decode_gpu(
     debug: bool = False,
     return_error_tensor: bool = False
 ) -> Tuple[torch.Tensor, Union[int, torch.Tensor]]:
-    """
-    Decodes Hamming encoded bits.
-    NOTE: If more than 1 error is present in a block (which Hamming(7,4) cannot handle),
-    this function will still output a 'corrected' codeword based on the syndrome.
-    This implies we DO NOT throw away blocks with multiple errors. We pass the 'best guess'
-    miscorrected data to PAR2, ensuring synchronization of the bitstream is maintained.
-    """
     n = h_matrix.shape[1]
     device = received_bits.device
     codewords = received_bits.view(-1, n)
@@ -347,8 +388,6 @@ def hamming_decode_gpu(
         num_errors = int(error_count_tensor.item())
     
     if debug and codewords.shape[0] > 0:
-        # Log first 10 codewords' syndrome info
-        logging.debug(f"Hamming decode debug: first 10 codewords:")
         for i in range(min(10, codewords.shape[0])):
             logging.debug(f"  CW {i}: syndrome_idx={syndrome_indices[i].item()}, has_error={syndrome_indices[i].item() > 0}")
     
@@ -367,7 +406,7 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     
     logging.info(f"Compressing data payload from '{input_path}' with 7-Zip (splitting at 1GB)...")
     
-    # that confuse PAR2/globbing tools for new files.
+    # Sanitize filename
     safe_stem = sanitize_filename(file_to_compress.stem)
     if not safe_stem: safe_stem = "payload"
     
@@ -379,7 +418,6 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     
     if not run_command(cmd): logging.error("Failed to compress data payload."); return None
     
-    # Identify all generated volumes via directory listing
     prefix = f"{safe_stem}_data_archive.7z"
     archive_files = sorted([f for f in temp_dir.iterdir() if f.name.startswith(prefix)])
     
@@ -398,7 +436,6 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
         par2_base_name = vol_file.name + ".recovery"
         par2_full_path = temp_dir / par2_base_name
         
-        
         logging.info(f"  Generating PAR2 for volume: {vol_file.name} (Block size: 256KB)")
         cmd = [
             par2_path, "c", "-qq", 
@@ -414,10 +451,8 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     logging.info("Generating file manifest...")
     files_to_encode, file_manifest = [], []
     
-    # Re-scan temp_dir for all relevant files to encode (archives + par2s)
     all_files = sorted([f for f in temp_dir.iterdir() if f.is_file()])
     for f_path in all_files:
-        # Match sanitized names
         if "data_archive.7z" in f_path.name and ".par2" not in f_path.name:
             file_type = "sz_vol" 
         elif f_path.name.endswith(".par2") and ".vol" not in f_path.name:
@@ -558,7 +593,7 @@ def encode_data_frames_gpu(bits_tensor_gpu: torch.Tensor, derived_params: Dict) 
     if payload_chunks_per_frame <= 0:
         raise ValueError("payload_chunks_per_frame must be > 0")
     num_frames = coded_chunks.shape[0] // payload_chunks_per_frame
-    logging.debug(f"encode_data_frames_gpu: coded_chunks={coded_chunks.shape}, payload_chunks_per_frame={payload_chunks_per_frame}, num_frames={num_frames}")
+    
     if num_frames == 0:
         return torch.empty(0, k_side, k_side, 4, dtype=torch.uint8, device=device)
     bits_per_frame_encoded = derived_params['total_encoded_bits_to_store_data']
@@ -570,9 +605,6 @@ def encode_data_frames_gpu(bits_tensor_gpu: torch.Tensor, derived_params: Dict) 
         coded_bits_flat = coded_bits_flat[:needed]
     frame_bit_chunks = coded_bits_flat.view(num_frames, bits_per_frame_encoded)
     frames_tensor = bit_chunks_to_frame_batch(frame_bit_chunks, k_side, palette, bits_per_color)
-    logging.info(
-        f"encode_data_frames_gpu: produced {frames_tensor.shape[0]} frames (k_side={k_side}), bits_per_frame={bits_per_frame_encoded}, actual_payload={actual_payload_bits} bits"
-    )
     return frames_tensor
 
 def get_derived_encoding_params(config: Dict, device: torch.device) -> Dict:
@@ -728,10 +760,6 @@ class FFmpegConsumerThread(threading.Thread):
         fps = self.config["VIDEO_FPS"]
         keyint = self.config.get("KEYINT_MAX", 1)
         
-        # Explicitly enforce output resolution via filters.
-        # libx264 often enforces mod-16 dimensions by default if not told otherwise.
-        # We also enforce yuv420p for standard H.264 compatibility.
-        
         # GPU Encoding Switch
         if self.config.get("ENABLE_NVENC", False):
             # GPU Settings (h264_nvenc)
@@ -867,6 +895,9 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
     temp_dir = output_dir / TEMP_ENCODE_DIR; temp_dir.mkdir(exist_ok=True)
     produced_files: List[Path] = []
     files_to_encode: List[Path] = []
+    
+    progress_bar = None
+    
     try:
         try:
             derived_params = get_derived_encoding_params(config, device)
@@ -888,16 +919,18 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         queue_depth = max(4, int(config.get("PIPELINE_QUEUE_DEPTH", 16)))
         data_queue, frame_queue = queue.Queue(maxsize=queue_depth), queue.Queue(maxsize=queue_depth)
         
-        # Revised Producer (Decoupled IO)
         producer = DataProducerThread(files_to_encode, data_queue, derived_params)
         consumer = FFmpegConsumerThread(frame_queue, output_base_path, config)
         producer.start(); consumer.start()
         
+        # Initialize progress bar
+        total_bits_to_encode = sum(f.stat().st_size for f in files_to_encode) * 8
+        progress_bar = ConsoleProgressBar(total_bits_to_encode, prefix="Encoding")
+        progress_bar.start()
+
         use_cuda = device.type == "cuda"
         overlap_streams = max(1, int(config.get("GPU_OVERLAP_STREAMS", 2))) if use_cuda else 1
         encode_streams = [torch.cuda.Stream(device=device) for _ in range(overlap_streams)] if use_cuda else []
-        if use_cuda:
-            logging.info(f"Using {overlap_streams} CUDA stream(s) for overlapped encode batches.")
         inflight_batches: Deque[Tuple[Optional[torch.cuda.Stream], torch.Tensor]] = deque()
         max_inflight = len(encode_streams) if encode_streams else 1
         next_stream_idx = 0
@@ -910,7 +943,6 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 if cpu_tensor is None or cpu_tensor.numel() == 0:
                     continue
                 ready_tensor = cpu_tensor.contiguous()
-                # Pushing to queue might block if FFmpeg is slow; that's unavoidable if disk IO is slow
                 frame_queue.put(ready_tensor)
 
         try:
@@ -918,10 +950,13 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
             frame_queue.put(barcode_frame_batch)
             frame_queue.put(info_frames_batch)
             while True:
-                # This should no longer spike the CPU or wait on disk
                 bits_tensor_cpu = data_queue.get()
                 if bits_tensor_cpu is None:
                     break
+                
+                current_batch_bits = bits_tensor_cpu.numel()
+                progress_bar.update(current_batch_bits)
+
                 if use_cuda:
                     pinned_bits = pin_tensor_if_possible(bits_tensor_cpu)
                     stream = encode_streams[next_stream_idx]
@@ -947,6 +982,7 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
             logging.error(f"Error in main processing loop: {e}", exc_info=True)
             producer.stop(); consumer.stop()
         finally:
+            if progress_bar: progress_bar.stop()
             frame_queue.put(None)
             logging.info("Waiting for producer thread to finish...")
             producer.join()
@@ -980,10 +1016,8 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                     target = video_file.with_name(video_file.name + ".mp4")
                 try:
                     video_file.rename(target)
-                    logging.info(f"Normalized output filename '{video_file.name}' -> '{target.name}' (missing .mp4 extension).")
                     normalized_files.append(target)
                 except OSError as e:
-                    logging.warning(f"Failed to append .mp4 extension to {video_file}: {e}")
                     normalized_files.append(video_file)
 
             produced_files = normalized_files
@@ -1422,25 +1456,16 @@ def decode_data_frames_gpu(
     # This extracts ALL bits from the frame (k_side^2 * bits_per_color), including padding
     coded_bits = frame_to_bits_batch(frame_batch, palette, bits_per_color)
     
-    # Log frame bits for diagnostics
     num_frames = frame_batch.shape[0]
-    max_bits_per_frame = k_side * k_side * bits_per_color  # 180*180*2 = 64,800 bits
     expected_bits = num_frames * total_encoded_bits_per_frame if total_encoded_bits is None else total_encoded_bits
     actual_bits = coded_bits.numel()
     bits_per_frame_extracted = actual_bits // num_frames if num_frames > 0 else 0
     
-    logging.info(f"Data decode: extracted {actual_bits} bits from {num_frames} frames")
-    logging.info(f"  Expected: {expected_bits} bits ({total_encoded_bits_per_frame}/frame nominal, {total_encoded_bits} actual)")
-    logging.info(f"  Actual per frame extracted: {bits_per_frame_extracted} bits")
-    logging.info(f"  Padding per frame: {bits_per_frame_extracted - total_encoded_bits_per_frame} bits")
-    
-    # THE FIX: Remove padding from each frame individually, but respect actual total
+    # Remove padding from each frame individually, but respect actual total
     # Each frame has max_bits_per_frame bits extracted, but only total_encoded_bits_per_frame are valid per frame
     if total_encoded_bits is not None and total_encoded_bits < expected_bits:
         # Last frame(s) have extra padding beyond the actual payload
         valid_bits = coded_bits[:total_encoded_bits]
-        discarded = actual_bits - total_encoded_bits
-        logging.info(f"  Discarding {discarded} extra padding bits ({discarded / num_frames:.1f} per frame on average)")
     else:
         # Standard case: each frame has padding_per_frame bits of padding
         valid_bits_list = []
@@ -1449,16 +1474,8 @@ def decode_data_frames_gpu(
             end_idx = start_idx + total_encoded_bits_per_frame
             valid_bits_list.append(coded_bits[start_idx:end_idx])
         valid_bits = torch.cat(valid_bits_list)
-        
-        # Log the per-frame padding removal
-        current_valid_bits = valid_bits.numel()
-        if actual_bits != current_valid_bits:
-            discarded = actual_bits - current_valid_bits
-            logging.info(f"  Discarding {discarded} per-frame padding bits ({discarded / num_frames:.1f} per frame)")
     
     if total_encoded_bits is not None and valid_bits.numel() > total_encoded_bits:
-        delta = valid_bits.numel() - total_encoded_bits
-        logging.info(f"  Trimming {delta} padding bits after per-frame alignment to match actual payload.")
         valid_bits = valid_bits[:total_encoded_bits]
 
     return hamming_decode_gpu(
@@ -1474,27 +1491,39 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
     logging.info(f"Starting decoding for '{input_path_str}'...")
     temp_dir = output_dir / TEMP_DECODE_DIR; temp_dir.mkdir(exist_ok=True)
     data_writer: Optional[DataWriterThread] = None
-    should_cleanup = True # Default to cleanup
-    decoding_successful = False # Track overall success
+    should_cleanup = True 
+    decoding_successful = False 
+    progress_bar = None
 
     try:
-        raw_inputs = [segment.strip() for segment in input_path_str.split(',') if segment.strip()]
-        if not raw_inputs:
-            logging.error("No input video paths provided for decoding.")
-            return
-
+        # Folder Input Logic
+        input_candidate = Path(input_path_str.strip())
         video_paths = []
-        for segment in raw_inputs:
-            candidate = Path(segment).expanduser()
-            if not candidate.exists():
-                logging.error(f"Input video not found: {candidate}")
+        
+        if input_candidate.is_dir():
+            logging.info(f"Input is a directory. Scanning for video files in {input_candidate}...")
+            valid_extensions = {'.mp4', '.avi', '.mkv', '.mov'}
+            video_paths = sorted([p for p in input_candidate.iterdir() if p.suffix.lower() in valid_extensions])
+            if not video_paths:
+                logging.error("No video files found in the provided directory.")
                 return
-            video_paths.append(candidate)
+        else:
+            # Comma-separated list logic
+            raw_inputs = [segment.strip() for segment in input_path_str.split(',') if segment.strip()]
+            if not raw_inputs:
+                logging.error("No input video paths provided.")
+                return
+            for segment in raw_inputs:
+                p = Path(segment).expanduser()
+                if not p.exists():
+                    logging.error(f"Input video not found: {p}")
+                    return
+                video_paths.append(p)
 
         primary_video = video_paths[0]
         multi_segment = len(video_paths) > 1
         if multi_segment:
-            segment_lines = "\n".join(f"  [{idx+1}] {path}" for idx, path in enumerate(video_paths))
+            segment_lines = "\n".join(f"  [{idx+1}] {path.name}" for idx, path in enumerate(video_paths))
             logging.info(f"Decoding will concatenate {len(video_paths)} segments:\n{segment_lines}")
         else:
             logging.info(f"Decoding single video: {primary_video}")
@@ -1514,10 +1543,9 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
             info_reader = SegmentedDataFrameReader(video_paths, config, temp_dir, initial_frame_offset=1, frame_type='info')
             info_frames_tensor = info_reader.fetch_frames(num_info_frames)
             if info_frames_tensor is None or info_frames_tensor.shape[0] < num_info_frames:
-                logging.error("Failed to extract required info frames across provided segments.")
+                logging.error("Failed to extract required info frames.")
                 return
             info_frames = info_frames_tensor[:num_info_frames]
-            logging.info(f"Read {info_frames.shape[0]} info frames from barcode ({num_info_frames} reported). Decoding them...")
         else:
             info_frames = []
             for i in range(num_info_frames):
@@ -1527,7 +1555,6 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                     return
                 info_frames.append(frame)
             info_frames = torch.stack(info_frames)
-            logging.info(f"Read {info_frames.shape[0]} info frames from barcode ({num_info_frames} reported). Decoding them...")
         
         info_syndrome_table = build_syndrome_lookup_table(INFO_H_MATRIX_TENSOR.to(device))
         session_params = decode_info_frames(info_frames, device, info_syndrome_table)
@@ -1536,16 +1563,6 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
             return
         logging.info("Successfully decoded info JSON.")
         
-        # DIAGNOSTIC: Log what we decoded
-        logging.info(f"Decoded manifest fields: info_frame_count={session_params.get('info_frame_count')}, data_frame_count={session_params.get('data_frame_count')}")
-        
-        # DIAGNOSTIC: Check if decoded info_frame_count matches barcode
-        decoded_info_frame_count = session_params.get("info_frame_count", num_info_frames)
-        if decoded_info_frame_count != num_info_frames:
-            logging.warning(f"⚠ Info frame count mismatch: barcode says {num_info_frames}, but JSON says {decoded_info_frame_count}")
-            logging.warning(f"   This may indicate an encoding issue. Using JSON value: {decoded_info_frame_count}")
-            num_info_frames = decoded_info_frame_count
-
         apply_snapshot_to_config(config, session_params.get("encode_config_snapshot"))
 
         data_output_dir = temp_dir / ASSEMBLED_FILES_DIR; data_output_dir.mkdir(exist_ok=True)
@@ -1557,33 +1574,22 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
         derived_params['h_matrix'] = DATA_H_MATRIX_TENSOR.to(device)
         derived_params['syndrome_table'] = build_syndrome_lookup_table(derived_params['h_matrix'])
 
-        total_payload_bytes = sum(f['size'] for f in session_params['file_manifest_detailed'])
-        total_payload_bits = total_payload_bytes * 8
         total_encoded_bits_budget = session_params.get("total_encoded_data_bits")
-        if total_encoded_bits_budget is None:
-            hamming_k = derived_params['hamming_k']
-            hamming_n = derived_params['hamming_n']
-            if hamming_k > 0:
-                total_encoded_bits_budget = math.ceil(total_payload_bits / hamming_k) * hamming_n
-            else:
-                total_encoded_bits_budget = 0
-            logging.info(f"   Derived encoded bit budget from manifest: {total_encoded_bits_budget} bits")
-        else:
-            logging.info(f"   Manifest advertised encoded bit budget: {total_encoded_bits_budget} bits")
-
-        # Calculate frame offset (data frames start after barcode + info frames)
+        
         frame_idx_offset = 1 + num_info_frames
         
         if 'data_frame_count' in session_params:
             num_data_frames = session_params['data_frame_count']
-            logging.info(f"[OK] Using data_frame_count from manifest: {num_data_frames} frames (padding frames will be ignored)")
         else:
             payload_bytes_per_frame = derived_params['payload_bits_data'] / 8
             total_payload_bytes = sum(f['size'] for f in session_params['file_manifest_detailed'])
             num_data_frames = math.ceil(total_payload_bytes / payload_bytes_per_frame) if payload_bytes_per_frame > 0 else 0
-            logging.info(f"[WARN] Calculated data_frame_count (fallback): {num_data_frames} frames")
         
-        logging.info(f"Data extraction will process frames {frame_idx_offset} to {frame_idx_offset + num_data_frames - 1} (total {num_data_frames} data frames)")
+        logging.info(f"Data extraction will process {num_data_frames} data frames.")
+
+        # Initialize Progress Bar
+        progress_bar = ConsoleProgressBar(num_data_frames, prefix="Decoding")
+        progress_bar.start()
 
         frame_producer_queue = None
         if not multi_segment:
@@ -1604,8 +1610,6 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
         use_cuda = device.type == "cuda"
         overlap_streams = max(1, int(config.get("GPU_OVERLAP_STREAMS", 2))) if use_cuda else 1
         decode_streams = [torch.cuda.Stream(device=device) for _ in range(overlap_streams)] if use_cuda else []
-        if use_cuda:
-            logging.info(f"Using {overlap_streams} CUDA stream(s) for overlapped decode batches.")
         inflight_decodes: Deque[Tuple[Optional[torch.cuda.Stream], torch.Tensor, Union[int, torch.Tensor]]] = deque()
         max_inflight_decodes = len(decode_streams) if decode_streams else 1
         next_decode_stream = 0
@@ -1627,117 +1631,76 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                 data_queue.put(np.packbits(ready_bits.cpu().numpy()).tobytes())
 
         try:
-            logging.info(f"DEBUG: Will extract data frames with indices {frame_idx_offset} to {frame_idx_offset + num_data_frames - 1}")
-            
-            # If using producer, loop slightly differently
+            # Shared processing logic
+            def process_batch(batch_tensor):
+                 nonlocal total_encoded_bits_budget, next_decode_stream
+                 
+                 progress_bar.update(batch_tensor.shape[0])
+
+                 bits_per_frame_encoded = derived_params['total_encoded_bits_to_store_data']
+                 batch_frame_count = batch_tensor.shape[0]
+                 batch_bits = batch_frame_count * bits_per_frame_encoded
+                 bits_argument = None
+                 if total_encoded_bits_budget is not None:
+                     bits_argument = min(total_encoded_bits_budget, batch_bits)
+                     total_encoded_bits_budget = max(0, total_encoded_bits_budget - bits_argument)
+
+                 if use_cuda:
+                     pinned_batch = pin_tensor_if_possible(batch_tensor)
+                     stream = decode_streams[next_decode_stream]
+                     next_decode_stream = (next_decode_stream + 1) % len(decode_streams)
+                     with torch.cuda.stream(stream):
+                         batch_gpu = pinned_batch.to(device, non_blocking=True)
+                         decoded_bits, num_corrections = decode_data_frames_gpu(batch_gpu, derived_params, bits_argument, return_error_tensor=True)
+                         decoded_bits_cpu = decoded_bits.to("cpu", non_blocking=True)
+                     inflight_decodes.append((stream, decoded_bits_cpu, num_corrections))
+                 else:
+                     decoded_bits, num_corrections = decode_data_frames_gpu(batch_tensor.to(device), derived_params, bits_argument)
+                     inflight_decodes.append((None, decoded_bits.cpu(), num_corrections))
+
+                 flush_decoded_batches()
+
             if frame_producer_queue:
                 while True:
                     if data_writer is not None and not data_writer.is_alive():
                         logging.error("DataWriterThread died unexpectedly! Aborting decode.")
                         break
-                    
                     batch_tensor_cpu = frame_producer_queue.get()
-                    if batch_tensor_cpu is None:
-                        break
-                    
-                    # Calculate bits budget for this specific batch size
-                    bits_per_frame_encoded = derived_params['total_encoded_bits_to_store_data']
-                    batch_frame_count = batch_tensor_cpu.shape[0]
-                    batch_bits = batch_frame_count * bits_per_frame_encoded
-                    bits_argument = None
-                    if total_encoded_bits_budget is not None:
-                        bits_argument = min(total_encoded_bits_budget, batch_bits)
-                        total_encoded_bits_budget = max(0, total_encoded_bits_budget - bits_argument)
-
-                    if use_cuda:
-                        pinned_batch = pin_tensor_if_possible(batch_tensor_cpu)
-                        stream = decode_streams[next_decode_stream]
-                        next_decode_stream = (next_decode_stream + 1) % len(decode_streams)
-                        with torch.cuda.stream(stream):
-                            batch_tensor = pinned_batch.to(device, non_blocking=True)
-                            decoded_bits, num_corrections = decode_data_frames_gpu(
-                                batch_tensor,
-                                derived_params,
-                                bits_argument,
-                                return_error_tensor=True
-                            )
-                            decoded_bits_cpu = decoded_bits.to("cpu", non_blocking=True)
-                        inflight_decodes.append((stream, decoded_bits_cpu, num_corrections))
-                    else:
-                        decoded_bits, num_corrections = decode_data_frames_gpu(
-                            batch_tensor_cpu.to(device),
-                            derived_params,
-                            bits_argument
-                        )
-                        inflight_decodes.append((None, decoded_bits.cpu(), num_corrections))
-
-                    flush_decoded_batches()
-            
+                    if batch_tensor_cpu is None: break
+                    process_batch(batch_tensor_cpu)
             else:
-                # Fallback to old loop for multi-segment (or if producer failed init)
-                reader = SegmentedDataFrameReader(video_paths, config, temp_dir, frame_idx_offset, frame_type='data') if multi_segment else None
+                reader = SegmentedDataFrameReader(video_paths, config, temp_dir, frame_idx_offset, frame_type='data')
                 for i in range(0, num_data_frames, batch_size):
-                    # Safety check: if writer crashed, don't deadlock
                     if data_writer is not None and not data_writer.is_alive():
-                        logging.error("DataWriterThread died unexpectedly! Aborting decode.")
                         break
-
                     start, end = i, min(i + batch_size, num_data_frames)
                     batch_count = end - start
+                    batch_tensor_cpu = reader.fetch_frames(batch_count)
+                    if batch_tensor_cpu is None or batch_tensor_cpu.shape[0] == 0:
+                        # Fill remaining if stream ended unexpectedly
+                        batch_tensor_cpu = torch.zeros((batch_count, config['DATA_K_SIDE'], config['DATA_K_SIDE'], PIXEL_CHANNELS), dtype=torch.uint8)
+                    elif batch_tensor_cpu.shape[0] < batch_count:
+                        deficit = batch_count - batch_tensor_cpu.shape[0]
+                        padding = torch.zeros((deficit, config['DATA_K_SIDE'], config['DATA_K_SIDE'], PIXEL_CHANNELS), dtype=torch.uint8)
+                        batch_tensor_cpu = torch.cat((batch_tensor_cpu, padding), dim=0)
                     
-                    if reader is not None:
-                        batch_tensor_cpu = reader.fetch_frames(batch_count)
-                        if batch_tensor_cpu is None or batch_tensor_cpu.shape[0] == 0:
-                            batch_tensor_cpu = torch.zeros((batch_count, config['DATA_K_SIDE'], config['DATA_K_SIDE'], PIXEL_CHANNELS), dtype=torch.uint8)
-                        elif batch_tensor_cpu.shape[0] < batch_count:
-                            deficit = batch_count - batch_tensor_cpu.shape[0]
-                            padding = torch.zeros((deficit, config['DATA_K_SIDE'], config['DATA_K_SIDE'], PIXEL_CHANNELS), dtype=torch.uint8)
-                            batch_tensor_cpu = torch.cat((batch_tensor_cpu, padding), dim=0)
-                    else:
-                        # Should not be reached if producer is active for single files
-                        batch_tensor_cpu = extract_frames_batch(primary_video, frame_idx_offset + start, batch_count, config, frame_type='data')
-                        if batch_tensor_cpu is None: break # Error
-
-                    bits_per_frame_encoded = derived_params['total_encoded_bits_to_store_data']
-                    batch_frame_count = batch_tensor_cpu.shape[0]
-                    batch_bits = batch_frame_count * bits_per_frame_encoded
-                    bits_argument = None
-                    if total_encoded_bits_budget is not None:
-                        bits_argument = min(total_encoded_bits_budget, batch_bits)
-                        if bits_argument <= 0: break
-                        total_encoded_bits_budget = max(0, total_encoded_bits_budget - bits_argument)
-
-                    if use_cuda:
-                        pinned_batch = pin_tensor_if_possible(batch_tensor_cpu)
-                        stream = decode_streams[next_decode_stream]
-                        next_decode_stream = (next_decode_stream + 1) % len(decode_streams)
-                        with torch.cuda.stream(stream):
-                            batch_tensor = pinned_batch.to(device, non_blocking=True)
-                            decoded_bits, num_corrections = decode_data_frames_gpu(batch_tensor, derived_params, bits_argument, return_error_tensor=True)
-                            decoded_bits_cpu = decoded_bits.to("cpu", non_blocking=True)
-                        inflight_decodes.append((stream, decoded_bits_cpu, num_corrections))
-                    else:
-                        decoded_bits, num_corrections = decode_data_frames_gpu(batch_tensor_cpu.to(device), derived_params, bits_argument)
-                        inflight_decodes.append((None, decoded_bits.cpu(), num_corrections))
-
-                    flush_decoded_batches()
+                    process_batch(batch_tensor_cpu)
             
             flush_decoded_batches(force=True)
 
         except KeyboardInterrupt:
             logging.warning("Keyboard interrupt during data decoding.")
         finally:
-            # Ensure we send the shutdown signal to the writer thread
+            if progress_bar: progress_bar.stop()
             data_queue.put(None)
             if data_writer is not None:
                 logging.info("Waiting for data writer thread to finish flushing all files to disk...")
                 try:
-                    # Give it a reasonable timeout, don't block forever if it's truly stuck
-                    data_writer.join(timeout=60) 
+                    data_writer.join(timeout=60)
                     if data_writer.is_alive():
-                         logging.error("Data writer thread is stuck and failed to join gracefully.")
+                         logging.error("Data writer thread is stuck.")
                     else:
-                         logging.info("Data writer finished. Disk synchronization complete.")
+                         logging.info("Data writer finished.")
                 except RuntimeError:
                     pass
 
@@ -1748,24 +1711,18 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
         par2_path = config["PAR2_PATH"]
         sz_path = config["SEVENZIP_PATH"]
         
-        # Iterate over all generated PAR2 index files.
         par2_indices = [f for f in data_output_dir.glob("*.par2") if ".vol" not in f.name]
         
         if not par2_indices:
             logging.warning("No PAR2 index files found. Skipping recovery step.")
         else:
             for par2_path_obj in sorted(par2_indices):
-                # Simple PAR2 call without renaming tricks
-                # We rely on the fact that NEW files are sanitized. 
-                # OLD unsanitized files will just fail to repair here but won't crash the script.
                 logging.info(f"Running PAR2 repair for volume set: {par2_path_obj.name}")
                 run_command([par2_path, "r", "-a", par2_path_obj.name], cwd=str(data_output_dir), stream_output=True)
 
-        # After repair, find the first 7z volume
         archive_candidates = list(data_output_dir.glob("*_data_archive.7z*"))
         main_archive = None
         for cand in archive_candidates:
-            # Look for .001 or just .7z
             if cand.name.endswith(".7z") or cand.name.endswith(".001"):
                 main_archive = cand
                 break
@@ -1785,7 +1742,6 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                     decoding_successful = True
                     break
                 
-                # Handle failure (wrong password, etc.)
                 if session_params.get("is_password_protected"):
                     logging.warning("Extraction failed. The password provided might be incorrect.")
                     print("\nOptions:")
@@ -1797,13 +1753,13 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                     
                     if choice == 'r':
                         current_password = getpass.getpass("Enter password: ")
-                        continue # Loop again to retry
+                        continue 
                     elif choice == 'k':
                         logging.warning("User cancelled extraction. Keeping temporary files.")
                         should_cleanup = False
                         decoding_successful = False
                         break
-                    else: # Default to cleanup (c)
+                    else: 
                         logging.warning("User cancelled extraction. Cleaning up.")
                         decoding_successful = False
                         break
@@ -1820,7 +1776,6 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
             logging.info(f"Decoding completed in {decode_elapsed:.1f}s ({decode_elapsed/60:.2f} min).")
         else:
             logging.error("Decoding process was aborted or failed.")
-            # If failed, remove the target directory to avoid confusion (if empty)
             if 'final_extraction_dir' in locals() and final_extraction_dir.exists():
                 try:
                     if not any(final_extraction_dir.iterdir()):
