@@ -91,6 +91,7 @@ def load_config() -> Dict[str, Any]:
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / CONFIG_FILENAME
     
+    # SAFE DEFAULTS FOR DOCKER/LINUX
     default_config = {
         "FFMPEG_PATH": "ffmpeg", 
         "SEVENZIP_PATH": "7z", 
@@ -99,22 +100,25 @@ def load_config() -> Dict[str, Any]:
         "VIDEO_HEIGHT": 720,
         "DATA_K_SIDE": 180, 
         "NUM_COLORS_DATA": 2,
-        
-        # New default: Hamming(127, 120) for 94% efficiency
         "DATA_HAMMING_N": 127,
         "DATA_HAMMING_K": 120,
-        
         "PAR2_REDUNDANCY_PERCENT": 5, 
         "X264_CRF": 30,
         "KEYINT_MAX": 1,
         "MAX_VIDEO_SEGMENT_HOURS": 11,
-        "CPU_PRODUCER_CHUNK_MB": 256,
-        "GPU_PROCESSOR_BATCH_SIZE": 512,
-        "GPU_OVERLAP_STREAMS": 8,
-        "PIPELINE_QUEUE_DEPTH": 64,
         "CPU_WORKER_THREADS": 2,
         "ENABLE_NVENC": True,
-        "VIDEO_FPS": 60 
+        "VIDEO_FPS": 60,
+        
+        # MEMORY SAFE SETTINGS
+        # 16MB Chunk -> 128MB expanded (uint8)
+        "CPU_PRODUCER_CHUNK_MB": 16,
+        
+        # 32 Queue * 128MB = ~4GB Max RAM usage
+        "PIPELINE_QUEUE_DEPTH": 32,
+        
+        "GPU_PROCESSOR_BATCH_SIZE": 512,
+        "GPU_OVERLAP_STREAMS": 8
     }
     
     if not config_path.exists():
@@ -188,6 +192,10 @@ def pin_tensor_if_possible(tensor: torch.Tensor) -> torch.Tensor:
         return tensor
 
 def sanitize_filename(name: str) -> str:
+    """
+    Sanitizes filenames to be safe for cross-platform usage.
+    Note: This is strictly for file names/stems, not paths.
+    """
     return re.sub(r'[^a-zA-Z0-9\._-]', '', name)
 
 # --- UI Helper Classes ---
