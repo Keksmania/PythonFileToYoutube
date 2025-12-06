@@ -21,13 +21,14 @@ RUN pip install --no-cache-dir \
 # 3. Install FFmpeg 7.0 (Stable) from yt-dlp builds
 # We use the yt-dlp mirror because they keep stable release filenames consistent.
 # This build supports NVENC and libx264.
-RUN wget https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.0-latest-linux64-gpl-7.0.tar.xz -O /tmp/ffmpeg.tar.xz \
+RUN wget https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -O /tmp/ffmpeg.tar.xz \
     && tar -xf /tmp/ffmpeg.tar.xz -C /tmp \
-    && mv /tmp/ffmpeg-n7.0-latest-linux64-gpl-7.0/bin/ffmpeg /usr/local/bin/ffmpeg \
-    && mv /tmp/ffmpeg-n7.0-latest-linux64-gpl-7.0/bin/ffprobe /usr/local/bin/ffprobe \
+    && mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe \
     && chmod +x /usr/local/bin/ffmpeg \
     && chmod +x /usr/local/bin/ffprobe \
     && rm -rf /tmp/ffmpeg*
+
 
 # 4. Remove the old Conda FFmpeg (Critical)
 RUN rm -f /opt/conda/bin/ffmpeg \
