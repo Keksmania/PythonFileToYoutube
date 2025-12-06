@@ -850,10 +850,9 @@ class FFmpegConsumerThread(threading.Thread):
             codec_args = [
                 '-c:v', 'h264_nvenc',
                 '-preset', 'p1',      # Fastest preset
-                '-rc', 'vbr',         # Variable Bitrate to allow quality focus
+                '-rc', 'vbr',         # Variable Bitrate
                 '-cq', str(crf),      # Constant Quality
-                '-spatial-aq', '1',   # Help retain spatial details (edges)
-                '-temporal-aq', '1'   
+                # REMOVED experimental flags that caused crashes
             ]
         else:
             # CPU Settings (libx264)
@@ -903,6 +902,7 @@ class FFmpegConsumerThread(threading.Thread):
         output_path = self._build_output_path(segment_index)
         command = self.ffmpeg_command_base + [str(output_path)]
         logging.info(f"Starting FFmpeg segment #{segment_index}: {output_path}")
+        # Capture stderr to pipe so we can read it on failure
         self.ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.output_paths.append(output_path)
         self.frames_written_in_segment = 0
@@ -916,16 +916,21 @@ class FFmpegConsumerThread(threading.Thread):
                 except (BrokenPipeError, OSError):
                     pass
             
-            # 2. Wait for process to exit normally
+            # 2. Wait for process to exit normally and capture stderr
             try:
-                self.ffmpeg_process.wait(timeout=5)
+                # We typically don't read stdout as it's null, but we read stderr for errors
+                _, stderr = self.ffmpeg_process.communicate(timeout=10)
+                
+                if self.ffmpeg_process.returncode != 0:
+                    logging.error(f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}")
+                    if stderr:
+                        logging.error(f"FFmpeg STDERR:\n{stderr.decode('utf-8', 'ignore')}")
             except subprocess.TimeoutExpired:
                 logging.warning("FFmpeg did not exit gracefully, terminating...")
                 self.ffmpeg_process.terminate()
-            
-            # 3. Check return code (ignore stderr since we directed it to PIPE but aren't reading it here)
-            if self.ffmpeg_process.returncode != 0 and not self.stop_event.is_set():
-                logging.error(f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}")
+                _, stderr = self.ffmpeg_process.communicate()
+                if stderr:
+                     logging.error(f"FFmpeg STDERR (after term):\n{stderr.decode('utf-8', 'ignore')}")
 
         self.ffmpeg_process = None
         self.frames_written_in_segment = 0
@@ -935,11 +940,18 @@ class FFmpegConsumerThread(threading.Thread):
             self._start_new_segment()
         if self.ffmpeg_process is None or self.ffmpeg_process.stdin is None:
             return
-        self.ffmpeg_process.stdin.write(frame_np.tobytes())
-        self.frames_written_in_segment += 1
-        if self.max_frames_per_segment and self.frames_written_in_segment >= self.max_frames_per_segment:
-            logging.info("Segment reached maximum duration; rotating to a new MP4 file.")
-            self._finalize_current_segment()
+        try:
+            self.ffmpeg_process.stdin.write(frame_np.tobytes())
+            self.frames_written_in_segment += 1
+            if self.max_frames_per_segment and self.frames_written_in_segment >= self.max_frames_per_segment:
+                logging.info("Segment reached maximum duration; rotating to a new MP4 file.")
+                self._finalize_current_segment()
+        except (BrokenPipeError, OSError):
+             logging.error("Failed to write to FFmpeg stdin (Broken Pipe). Process may have died.")
+             # Trigger finalize to read the error code
+             self._finalize_current_segment()
+             # Raise to stop the loop
+             raise
 
     def run(self):
         logging.info("FFmpegConsumerThread started.")
@@ -972,19 +984,10 @@ class FFmpegConsumerThread(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
-        # Do not force terminate here immediately. Let the run loop finish or finalize handle it.
-        # But if we must:
+        # We assume the main loop will send None or we wait for it to drain
+        # If forced:
         if self.ffmpeg_process:
-            if self.ffmpeg_process.stdin:
-                try:
-                    self.ffmpeg_process.stdin.close()
-                except:
-                    pass
-            try:
-                self.ffmpeg_process.wait(timeout=5)
-            except:
-                self.ffmpeg_process.terminate()
-        self._finalize_current_segment()
+             self._finalize_current_segment()
 
 def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[str], config: Dict, device: torch.device):
     encode_start = time.perf_counter()
