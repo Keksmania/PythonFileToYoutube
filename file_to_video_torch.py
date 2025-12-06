@@ -87,15 +87,6 @@ def setup_pytorch() -> torch.device:
         device = torch.device("cpu")
     return device
 
-def check_ffmpeg_nvenc(ffmpeg_path: str) -> bool:
-    """Checks if the installed FFmpeg supports h264_nvenc."""
-    try:
-        cmd = [ffmpeg_path, '-encoders']
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return 'h264_nvenc' in result.stdout
-    except Exception:
-        return False
-
 def load_config() -> Dict[str, Any]:
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / CONFIG_FILENAME
@@ -763,7 +754,11 @@ class DataProducerThread(threading.Thread):
                 bit_buffer = bit_buffer[self.bits_per_batch:]
             
             # Fetch more data
-            raw_chunk = self.raw_queue.get()
+            try:
+                raw_chunk = self.raw_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
             if raw_chunk is None:
                 # End of data stream. Push remaining bits.
                 if len(bit_buffer) > 0:
@@ -772,12 +767,29 @@ class DataProducerThread(threading.Thread):
                     self.data_queue.put(torch.from_numpy(padded_data).to(torch.uint8))
                 
                 # Signal completion to main thread
-                self.raw_queue.put(None) 
+                self.data_queue.put(None) 
                 return
 
-            # Heavy CPU operation
-            np_bits = np.unpackbits(np.frombuffer(raw_chunk, dtype=np.uint8))
-            bit_buffer = np.concatenate((bit_buffer, np_bits))
+            # OPTIMIZATION: Process large chunks in smaller blocks to avoid massive memory duplication
+            # Instead of np.concatenate(huge_buffer, huge_new_bits), we slice the new bits into batches immediately.
+            
+            new_bits = np.unpackbits(np.frombuffer(raw_chunk, dtype=np.uint8))
+            
+            # Prepend existing buffer
+            if len(bit_buffer) > 0:
+                new_bits = np.concatenate((bit_buffer, new_bits))
+                
+            # Slice and dice
+            total_len = len(new_bits)
+            cursor = 0
+            while cursor + self.bits_per_batch <= total_len:
+                if self.stop_event.is_set(): return
+                batch = new_bits[cursor : cursor + self.bits_per_batch]
+                self.data_queue.put(torch.from_numpy(batch).to(torch.uint8))
+                cursor += self.bits_per_batch
+            
+            # Save remainder
+            bit_buffer = new_bits[cursor:]
 
     def run(self):
         logging.info(f"DataProducerThread started with {self.num_workers} workers.")
@@ -786,9 +798,12 @@ class DataProducerThread(threading.Thread):
         reader_thread = threading.Thread(target=self.file_reader, daemon=True)
         reader_thread.start()
 
-        self.bit_packer_worker()
+        try:
+            self.bit_packer_worker()
+        except Exception as e:
+            logging.error(f"Bit packer worker failed: {e}", exc_info=True)
+            self.data_queue.put(None)
         
-        self.data_queue.put(None) # Signal main loop
         logging.info("DataProducerThread finished.")
 
     def stop(self):
@@ -855,7 +870,7 @@ class FFmpegConsumerThread(threading.Thread):
         # GPU Encoding Switch
         if self.config.get("ENABLE_NVENC", False):
             # GPU Settings (h264_nvenc)
-            # CHECK if nvenc is supported first? We rely on main config check, but here we construct cmd.
+            # Reverted to basic safe arguments to avoid driver issues on Docker
             logging.info(f"Using GPU Encoding (h264_nvenc) with CRF/CQ={crf}")
             codec_args = [
                 '-c:v', 'h264_nvenc',
@@ -934,13 +949,17 @@ class FFmpegConsumerThread(threading.Thread):
                 logging.warning("FFmpeg did not exit gracefully, terminating...")
                 self.ffmpeg_process.terminate()
             
-            # 3. Check return code (ignore stderr since we directed it to PIPE but aren't reading it here unless error)
+            # 3. Check return code
             if self.ffmpeg_process.returncode != 0:
                 logging.error(f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}")
-                # We can try to read stderr here if we want to debug
-                if self.ffmpeg_process.stderr:
-                     err_out = self.ffmpeg_process.stderr.read()
-                     logging.error(f"FFmpeg STDERR:\n{err_out.decode('utf-8', 'ignore')}")
+                # Try to read stderr for debug info
+                try:
+                    if self.ffmpeg_process.stderr:
+                        err_out = self.ffmpeg_process.stderr.read()
+                        if err_out:
+                            logging.error(f"FFmpeg STDERR:\n{err_out.decode('utf-8', 'ignore')}")
+                except Exception:
+                    pass
 
         self.ffmpeg_process = None
         self.frames_written_in_segment = 0
@@ -958,7 +977,7 @@ class FFmpegConsumerThread(threading.Thread):
                 self._finalize_current_segment()
         except (BrokenPipeError, OSError):
              logging.error("Failed to write to FFmpeg stdin (Broken Pipe). Process may have died.")
-             # Trigger finalize to read the error code
+             # Trigger finalize to read the error code and safely close
              self._finalize_current_segment()
              # Raise to stop the loop
              raise
@@ -997,16 +1016,7 @@ class FFmpegConsumerThread(threading.Thread):
         # Do not force terminate here immediately. Let the run loop finish or finalize handle it.
         # But if we must:
         if self.ffmpeg_process:
-            if self.ffmpeg_process.stdin:
-                try:
-                    self.ffmpeg_process.stdin.close()
-                except:
-                    pass
-            try:
-                self.ffmpeg_process.wait(timeout=5)
-            except:
-                self.ffmpeg_process.terminate()
-        self._finalize_current_segment()
+            self._finalize_current_segment()
 
 def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[str], config: Dict, device: torch.device):
     encode_start = time.perf_counter()
