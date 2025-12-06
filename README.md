@@ -19,112 +19,131 @@ The script is optimized for YouTube. Meaning the default config is good enough t
 | Component | Notes |
 | --- | --- |
 | Python | 3.11 (system install). Earlier versions are untested. |
-| PyTorch | GPU build (2.9.0+ with CUDA 13.x recommended). Install from https://pytorch.org. |
+| PyTorch | GPU build (2.9.0+ with CUDA 13.x recommended). |
 | CUDA | NVIDIA GPU drivers + CUDA toolkit matching your PyTorch build. `nvidia-smi` must work. |
-| FFmpeg | Must include `libx264` encoder. For GPU encoding, it must support `h264_nvenc`. |
+| FFmpeg | **Crucial:** Must support `h264_nvenc` for GPU acceleration. Standard CPU builds will be very slow. |
 | 7-Zip CLI | `7z` binary (`p7zip-full` on Linux, official installer on Windows). |
 | PAR2 | `par2`/`par2cmdline` binary for creating redundancy blocks. |
 | Disk space | Enough to store the temp archive, PAR2 set, intermediate frames, and final MP4(s). |
 
+---
+
 ## Installation & Setup
 
-You have two options: **Local Install** (manual dependency management) or **Docker** (recommended for ease of use).
+### Step 1: Get the Code (Required for both methods)
+Regardless of how you run the script, you first need to download the code to your machine.
 
-### Option 1: Docker (Recommended)
+```bash
+git clone https://github.com/Keksmania/PythonFileToYoutube.git
+cd PythonFileToYoutube
+```
 
-Docker handles all software dependencies (Python, FFmpeg, 7-Zip, PAR2, PyTorch). You only need to ensure your host machine has the GPU drivers installed.
+### Step 2: Choose your Installation Method
 
-#### Prerequisites
+#### Option A: Docker (Recommended)
+Docker handles all software dependencies (Python, FFmpeg, 7-Zip, PAR2, PyTorch) automatically. You only need to ensure your host machine has the GPU drivers and container toolkit installed.
 
-1.  **NVIDIA GPU Drivers:** Install the latest drivers for your graphics card on your host machine.
-2.  **Docker:** Install Docker for your OS.
+**1. Install GPU Support for Docker:**
 
-#### Windows (WSL2) Setup
-1.  **Install Docker Desktop:** Download and install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/).
-2.  **Enable WSL2 Backend:** During installation (or in Settings > General), ensure "Use the WSL 2 based engine" is checked.
-3.  **Verify GPU:** Open PowerShell and run `nvidia-smi`. If you see your GPU, Docker will automatically be able to use it via WSL2.
+*   **Windows Users:**
+    *   Install **[Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)**.
+    *   During installation (or in Settings > General), ensure **"Use the WSL 2 based engine"** is checked.
+    *   *Note:* The NVIDIA Container Toolkit is included with Docker Desktop on Windows. You do not need to install it separately.
 
-#### Linux Setup
-1.  **Install Docker Engine:** Follow the official guide for [Ubuntu/Debian/CentOS](https://docs.docker.com/engine/install/).
-2.  **Install NVIDIA Container Toolkit:** This is required for Docker to see your GPU.
-    ```bash
-    # Add the package repositories
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-    && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-      sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-      sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+*   **Linux Users:**
+    *   Install the **[Docker Engine](https://docs.docker.com/engine/install/)**.
+    *   **Crucial:** You must install the **[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)** so Docker can access your GPU.
+    *   *Quick command for apt-based systems (Ubuntu/Debian):*
+        ```bash
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+        && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        
+        sudo apt-get update
+        sudo apt-get install -y nvidia-container-toolkit
+        sudo nvidia-ctk runtime configure --runtime=docker
+        sudo systemctl restart docker
+        ```
 
-    # Install the toolkit
-    sudo apt-get update
-    sudo apt-get install -y nvidia-container-toolkit
+**2. Build and Start the Container:**
+Make sure you are inside the `PythonFileToYoutube` folder.
+```bash
+docker-compose up -d --build
+```
+*This command downloads the heavy PyTorch image and sets up the environment. It may take a few minutes.*
 
-    # Configure Docker
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    ```
-
-#### Running with Docker
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Keksmania/PythonFileToYoutube.git
-    cd PythonFileToYoutube
-    ```
-2.  **Build and Start the Container:**
-    ```bash
-    docker-compose up -d --build
-    ```
-3.  **Run the script:**
-    The `docker-compose.yml` maps the current folder to `/app` inside the container.
-    ```bash
-    # Example Encode
-    docker-compose exec f2yt python file_to_video_torch.py -mode encode -input "my_folder"
-
-    # Example Decode
-    docker-compose exec f2yt python file_to_video_torch.py -mode decode -input "my_folder_F2YT"
-    ```
+**3. Understanding Data Transfer:**
+The Docker setup uses a **Bind Mount**. The folder `PythonFileToYoutube` on your computer is mapped directly to `/app` inside the Docker container.
+*   **To Encode:** Put your files in the `PythonFileToYoutube` folder on your computer. Inside Docker, they appear at `/app/filename`.
+*   **To Retrieve:** The output videos created by Docker will instantly appear in your `PythonFileToYoutube` folder on your computer.
 
 ---
 
-### Option 2: Local Install (Manual)
+#### Option B: Local Install (Manual)
+Use this if you prefer to manage dependencies yourself directly on your host OS.
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Keksmania/PythonFileToYoutube.git
-    cd PythonFileToYoutube
-    ```
-2.  **Install Python dependencies:**
+1.  **Install Python Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-3.  **Install external tools:**
-    *   **Windows:** Download and install FFmpeg, 7-Zip, and PAR2. Add their folders to your System `PATH`.
-    *   **Linux:** `sudo apt install ffmpeg p7zip-full par2`
-4.  **Verify Environment:**
-    *   Windows: `.\tools\check_deps_windows.cmd`
-    *   Linux: `./tools/check_deps_linux.sh`
-5.  **Run:**
-    ```bash
-    python file_to_video_torch.py -mode encode -input "my_folder"
-    ```
 
-## Usage Guide
+2.  **Install External Tools:**
+    *   **Windows:** 
+        *   **FFmpeg:** Download a "Full" build from [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases). 
+        *   **Important:** Ensure you download a version that explicitly lists **hardware acceleration** or **non-free** support. The generic "essentials" build sometimes lacks NVENC.
+        *   **7-Zip:** Download and install from [7-zip.org](https://www.7-zip.org/download.html).
+        *   **PAR2:** Download `par2cmdline` for Windows.
+        *   **Path:** You **must** add the folders containing `ffmpeg.exe`, `7z.exe`, and `par2.exe` to your Windows System `PATH` environment variable.
 
-### Encoding
-```powershell
-python file_to_video_torch.py -mode encode -input "C:\path\to\file_or_folder" [-output "C:\path\to\output_dir"] [-p password]
+    *   **Linux:**
+        ```bash
+        sudo apt update
+        sudo apt install ffmpeg p7zip-full par2
+        ```
+        *   *Note:* Verify your installed FFmpeg supports NVENC by running `ffmpeg -encoders | grep nvenc`. If it produces no output, you may need to compile FFmpeg from source with `--enable-nvenc` or find a static build that includes it.
+
+3.  **Verify Environment:**
+    Run the included check script to ensure all tools are visible.
+    *   **Windows PowerShell:** `.\tools\check_deps_windows.cmd`
+    *   **Linux/macOS Bash:** `./tools/check_deps_linux.sh`
+
+---
+
+## Usage
+
+### 1. Encoding (File -> Video)
+
+**Using Docker:**
+```bash
+# Note: Input path must start with /app/
+docker-compose exec f2yt python file_to_video_torch.py -mode encode -input "/app/my_secret_data.zip"
 ```
-- The output directory will contain `*_F2YT.mp4` (or segmented `_part###.mp4`) files.
-- Set `-p` to password-protect the 7z archive.
 
-### Decoding
+**Using Local Install:**
 ```powershell
-python file_to_video_torch.py -mode decode -input "video_part001.mp4,video_part002.mp4" [-output "C:\path\to\restore"] [-p password]
+python file_to_video_torch.py -mode encode -input "C:\path\to\my_secret_data.zip" [-output "C:\path\to\output_dir"]
 ```
-- **Folder Input:** You can point `-input` to a folder containing the video parts; the script will sort them automatically (recommended).
-- **File Input:** If providing a list, use a comma-separated string.
-- If no output directory is specified, it defaults to `_F2YT_Output` next to the first input file.
-- Decoded files end up in `<output>/Decoded_Files` once 7-Zip and PAR2 complete.
+
+*   **Output:** The script will create `*_F2YT.mp4` (or `_part001.mp4`) files in the output directory.
+*   **Options:** Add `-p mypassword` to password-protect the internal archive.
+
+### 2. Decoding (Video -> File)
+
+**Using Docker:**
+```bash
+# Point to the FOLDER containing the video parts (Recommended)
+docker-compose exec f2yt python file_to_video_torch.py -mode decode -input "/app/my_secret_data_F2YT_Output"
+```
+
+**Using Local Install:**
+```powershell
+# Point to the FOLDER containing the video parts
+python file_to_video_torch.py -mode decode -input "C:\path\to\my_secret_data_F2YT_Output"
+```
+
+*   **Sorting:** If you point input to a folder, the script automatically finds and sorts valid video files.
+*   **Result:** Decoded files will appear in `<output_dir>/Decoded_Files` once 7-Zip and PAR2 recovery are complete.
 
 ## Configuration Reference (`f2yt_config.json`)
 
@@ -159,7 +178,7 @@ python file_to_video_torch.py -mode decode -input "video_part001.mp4,video_part0
 
 ## Troubleshooting
 
-- **Dependency missing** – Run the OS-specific dependency script; install any reported tool and rerun.
+- **Dependency missing** – Run the OS-specific dependency script (Option B steps); install any reported tool and rerun.
 - **CUDA unavailable** – Confirm `nvidia-smi` works and that your PyTorch build reports `torch.cuda.is_available() == True`.
 - **FFmpeg errors** – Inspect the log output. Ensure your `ffmpeg` build supports `libx264` (or `h264_nvenc` if enabled).
 - **Decode hangs or stops early** – The script uses FFmpeg pipes. Ensure your disk has enough space for temporary files.
