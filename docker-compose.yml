@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   f2yt:
     build: .
@@ -13,6 +11,9 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, video, compute, utility]
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=all
     command: tail -f /dev/null
     shm_size: '8gb'
