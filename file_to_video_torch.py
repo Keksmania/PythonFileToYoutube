@@ -908,17 +908,25 @@ class FFmpegConsumerThread(threading.Thread):
         self.frames_written_in_segment = 0
 
     def _finalize_current_segment(self):
-        if self.ffmpeg_process and self.ffmpeg_process.stdin:
-            try:
-                self.ffmpeg_process.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass
         if self.ffmpeg_process:
-            _, stderr = self.ffmpeg_process.communicate()
+            # 1. Close stdin to signal EOF to ffmpeg (graceful shutdown)
+            if self.ffmpeg_process.stdin:
+                try:
+                    self.ffmpeg_process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+            
+            # 2. Wait for process to exit normally
+            try:
+                self.ffmpeg_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.warning("FFmpeg did not exit gracefully, terminating...")
+                self.ffmpeg_process.terminate()
+            
+            # 3. Check return code (ignore stderr since we directed it to PIPE but aren't reading it here)
             if self.ffmpeg_process.returncode != 0 and not self.stop_event.is_set():
-                logging.error(
-                    f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}:\n{stderr.decode('utf-8', 'ignore')}"
-                )
+                logging.error(f"FFmpeg process exited with error code {self.ffmpeg_process.returncode}")
+
         self.ffmpeg_process = None
         self.frames_written_in_segment = 0
 
@@ -964,12 +972,18 @@ class FFmpegConsumerThread(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
+        # Do not force terminate here immediately. Let the run loop finish or finalize handle it.
+        # But if we must:
         if self.ffmpeg_process:
-            self.ffmpeg_process.terminate()
+            if self.ffmpeg_process.stdin:
+                try:
+                    self.ffmpeg_process.stdin.close()
+                except:
+                    pass
             try:
                 self.ffmpeg_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.ffmpeg_process.kill()
+            except:
+                self.ffmpeg_process.terminate()
         self._finalize_current_segment()
 
 def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[str], config: Dict, device: torch.device):
@@ -1084,10 +1098,10 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 current_part = produced_files[0]
                 try:
                     current_part.rename(legacy_name)
-                    logging.info(f"Renamed single segment {current_part.name} -> {legacy_name.name} for backwards compatibility.")
+                    logging.info(f"Renamed single segment {current_part.name} -> {legacy_name.name}")
                     produced_files = [legacy_name]
                 except OSError as e:
-                    logging.warning(f"Could not rename {current_part} to {legacy_name}: {e}")
+                    logging.warning(f"Could not rename: {e}")
 
             normalized_files = []
             for video_file in produced_files:
@@ -1100,7 +1114,7 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 try:
                     video_file.rename(target)
                     normalized_files.append(target)
-                except OSError as e:
+                except OSError:
                     normalized_files.append(video_file)
 
             produced_files = normalized_files
@@ -1108,6 +1122,7 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
             for video_file in produced_files:
                 logging.info(f"Encoding pipeline finalized segment: {video_file}")
             logging.info("Encoding pipeline finished.")
+        
         total_payload_size = sum(f.stat().st_size for f in files_to_encode)
         logging.info("--- ENCODING SUMMARY (Overall) ---")
         logging.info(f"Original Input: {input_path}")
@@ -1146,11 +1161,10 @@ class DataWriterThread(threading.Thread):
             file_handles, current_file_idx, bytes_written_to_current_file = {}, 0, 0
             manifest_files = self.manifest['file_manifest_detailed']
             # Optimization: Use a larger buffer size for file writing (1MB)
-            write_buffer_size = 1024 * 1024
+            write_buffer_size = 1024 * 1024 * 4 # 4MB Buffer
             
             while not self.stop_event.is_set():
                 try:
-                    # Non-blocking get with short timeout to check stop_event frequently
                     data_bytes = self.data_queue.get(timeout=0.5)
                     if data_bytes is None: break
                 except queue.Empty:
@@ -1198,18 +1212,14 @@ def extract_frame_as_tensor(video_path: Path, frame_index: int, temp_dir: Path, 
     ffmpeg_path = config["FFMPEG_PATH"]
     fps = config.get("VIDEO_FPS", 60)
     
-    # Determine extraction resolution based on frame type
     if frame_type == 'barcode':
-        extract_size = 720  # Barcode needs full width
+        extract_size = 720
     elif frame_type == 'info':
-        extract_size = INFO_K_SIDE  # 16x16 for info frames
-    else:  # 'data'
+        extract_size = INFO_K_SIDE
+    else:
         extract_size = config.get("DATA_K_SIDE", 180)
     
-    # Calculate timestamp from frame index
     timestamp = frame_index / fps
-    
-    # Extract at appropriate size to avoid upscaling/downscaling precision loss
     command = [
         ffmpeg_path, '-hide_banner', '-loglevel', 'error',
         '-accurate_seek',
@@ -1222,9 +1232,6 @@ def extract_frame_as_tensor(video_path: Path, frame_index: int, temp_dir: Path, 
     ]
     try:
         proc = subprocess.run(command, capture_output=True, check=True, timeout=10)
-        if proc.stdout is None or len(proc.stdout) == 0:
-            logging.error(f"FFmpeg extracted empty stdout for frame {frame_index}.")
-            return None
         img_bytes = proc.stdout
         with Image.open(io.BytesIO(img_bytes)) as img:
             img_rgb = img.convert('RGB')
@@ -1232,80 +1239,33 @@ def extract_frame_as_tensor(video_path: Path, frame_index: int, temp_dir: Path, 
             if np_frame.shape[:2] != (extract_size, extract_size):
                 np_frame = np.array(Image.fromarray(np_frame).resize((extract_size, extract_size), Image.Resampling.NEAREST))
         return torch.from_numpy(np_frame)
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to extract frame {frame_index}. FFmpeg stderr:\n{e.stderr.decode('utf-8', 'ignore') if e.stderr else 'no stderr'}")
-        return None
-    except subprocess.TimeoutExpired:
-        logging.error(f"FFmpeg frame extraction timed out for frame {frame_index}.")
-        return None
     except Exception as e:
-        logging.error(f"An error occurred loading extracted frame {frame_index}: {e}")
+        logging.error(f"Failed to extract frame {frame_index}: {e}")
         return None
 
 def extract_frames_batch(video_path: Path, start_frame_index: int, frame_count: int, config: Dict, frame_type: str = 'data') -> Optional[torch.Tensor]:
-    """Extract a contiguous batch of frames. Returns fewer frames than requested if EOF is reached."""
-    if frame_count <= 0:
-        return None
-
+    """Extract a batch using seeking. Only used for Info/Barcode or single-file fallback."""
+    if frame_count <= 0: return None
     ffmpeg_path = config["FFMPEG_PATH"]
     fps = config.get("VIDEO_FPS", 60)
-    
-    if frame_type == 'info':
-        extract_size = INFO_K_SIDE
-    elif frame_type == 'barcode':
-        extract_size = max(config.get("VIDEO_WIDTH", 720), config.get("VIDEO_HEIGHT", 720))
-    else:
-        extract_size = config.get("DATA_K_SIDE", 180)
-
+    extract_size = config.get("DATA_K_SIDE", 180) if frame_type == 'data' else (INFO_K_SIDE if frame_type == 'info' else 720)
     timestamp = start_frame_index / fps
-    scale_filter = (
-        f"scale={extract_size}:{extract_size}:flags=neighbor:force_original_aspect_ratio=decrease,"
-        f"pad={extract_size}:{extract_size}:(ow-iw)/2:(oh-ih)/2"
-    )
-    
-    # -vsync 0 prevents ffmpeg from generating duplicate frames to fill gaps, 
-    # ensuring we only get what actually exists in the file.
+    scale_filter = f"scale={extract_size}:{extract_size}:flags=neighbor:force_original_aspect_ratio=decrease,pad={extract_size}:{extract_size}:(ow-iw)/2:(oh-ih)/2"
     command = [
-        ffmpeg_path,
-        '-hide_banner', '-loglevel', 'error',
-        '-accurate_seek', '-seek_timestamp', '1',
-        '-ss', f'{timestamp:.6f}',
-        '-i', str(video_path),
-        '-vframes', str(frame_count),
-        '-vf', scale_filter,
-        '-pix_fmt', 'rgb24',
-        '-vsync', '0', 
-        '-f', 'rawvideo',
-        '-'
+        ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-accurate_seek', '-seek_timestamp', '1',
+        '-ss', f'{timestamp:.6f}', '-i', str(video_path), '-vframes', str(frame_count),
+        '-vf', scale_filter, '-pix_fmt', 'rgb24', '-vsync', '0', '-f', 'rawvideo', '-'
     ]
-
     try:
         proc = subprocess.run(command, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        # It's common for ffmpeg to return non-zero if we ask for frames past EOF, 
-        # even if it outputted valid data before the error.
-        # We check if we got data in stdout anyway.
-        if not proc.stdout:
-            logging.error(f"FFmpeg extraction failed for {video_path}: {e.stderr.decode('utf-8', 'ignore')}")
-            return None
-
-    raw = proc.stdout
-    if not raw:
+        raw = proc.stdout
+        if not raw: return None
+        bytes_per_frame = extract_size * extract_size * 3
+        actual_frames = len(raw) // bytes_per_frame
+        if actual_frames == 0: return None
+        return torch.from_numpy(np.frombuffer(raw[:actual_frames*bytes_per_frame], dtype=np.uint8).copy()).view(actual_frames, extract_size, extract_size, 3).to(torch.uint8)
+    except Exception:
         return None
-
-    bytes_per_frame = extract_size * extract_size * 3
-    total_bytes = len(raw)
-    actual_frames = total_bytes // bytes_per_frame
-    
-    if actual_frames == 0:
-        return None
-
-    # Just return what we got. The caller (SegmentedDataFrameReader) handles logic if actual < requested.
-    usable_bytes = actual_frames * bytes_per_frame
-    np_buffer = np.frombuffer(raw[:usable_bytes], dtype=np.uint8).copy()
-    frame_tensor = torch.from_numpy(np_buffer).view(actual_frames, extract_size, extract_size, 3).to(torch.uint8)
-    return frame_tensor
-
 
 class ContinuousPipeFrameReader:
     """
