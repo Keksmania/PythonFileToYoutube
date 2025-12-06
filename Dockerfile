@@ -18,9 +18,7 @@ RUN pip install --no-cache-dir \
     pillow \
     numpy
 
-# 3. Install FFmpeg 7.0 (Stable) from yt-dlp builds
-# We use the yt-dlp mirror because they keep stable release filenames consistent.
-# This build supports NVENC and libx264.
+
 RUN wget https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -O /tmp/ffmpeg.tar.xz \
     && tar -xf /tmp/ffmpeg.tar.xz -C /tmp \
     && mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg \
