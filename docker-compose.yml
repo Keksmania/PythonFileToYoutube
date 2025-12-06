@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  f2yt:
+    build: .
+    image: f2yt-encoder
+    container_name: f2yt_container
+    # Mount the current directory to /app so the script can see files
+    volumes:
+      - .:/app
+    # Enable GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Keep the container running so we can exec commands into it
+    command: tail -f /dev/null
+    # Shared memory size increase (crucial for PyTorch dataloaders)
+    shm_size: '8gb'

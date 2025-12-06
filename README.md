@@ -1,8 +1,7 @@
 # PythonFileToYoutube
 
-Turn any file or folder into one or more MP4 videos (and back again) using the file_to_video_torch.py script provided in this repo.
-The script is optimized for youtube. Meaning the default config is good enough that a file should be able to survice a full round trip to youtube and back. 
-
+Turn any file or folder into one or more MP4 videos (and back again) using the `file_to_video_torch.py` script provided in this repo.
+The script is optimized for YouTube. Meaning the default config is good enough that a file should be able to survive a full round trip to YouTube and back.
 
 ## Features
 
@@ -13,40 +12,103 @@ The script is optimized for youtube. Meaning the default config is good enough t
 - **Robust Redundancy** – Splits large files into 1GB volumes and generates optimized 128KB PAR2 blocks for granular recovery.
 - **Segmented output** – Automatically rotates MP4 files when they exceed the configured length (default ~11 hours at 60fps).
 - **Robust metadata** – Barcode + info frames describe payload size, frame counts, and optional password protection.
-- **Cross-platform** – Works on Windows and Linux as long as the external tools are installed.
+- **Cross-platform** – Works on Windows and Linux as long as the external tools are installed (or via Docker).
 
 ## Requirements
 
 | Component | Notes |
 | --- | --- |
 | Python | 3.11 (system install). Earlier versions are untested. |
-| PyTorch | GPU build (2.9.0+ with CUDA 13.x). Install from https://pytorch.org. |
+| PyTorch | GPU build (2.9.0+ with CUDA 13.x recommended). Install from https://pytorch.org. |
 | CUDA | NVIDIA GPU drivers + CUDA toolkit matching your PyTorch build. `nvidia-smi` must work. |
 | FFmpeg | Must include `libx264` encoder. For GPU encoding, it must support `h264_nvenc`. |
 | 7-Zip CLI | `7z` binary (`p7zip-full` on Linux, official installer on Windows). |
 | PAR2 | `par2`/`par2cmdline` binary for creating redundancy blocks. |
 | Disk space | Enough to store the temp archive, PAR2 set, intermediate frames, and final MP4(s). |
 
-Use the provided dependency scripts to verify your environment quickly:
+## Installation & Setup
 
-- Windows PowerShell: `.\tools\check_deps_windows.cmd`
-- Linux/macOS Bash: `./tools/check_deps_linux.sh`
+You have two options: **Local Install** (manual dependency management) or **Docker** (recommended for ease of use).
 
-Each script lists missing dependencies and suggests installation steps (including CUDA checks).
+### Option 1: Docker (Recommended)
 
-## Setup
+Docker handles all software dependencies (Python, FFmpeg, 7-Zip, PAR2, PyTorch). You only need to ensure your host machine has the GPU drivers installed.
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Keksmania/PythonFileToYoutube.git
-   cd PythonFileToYoutube
-   ```
-2. **Install Python dependencies** – the project relies solely on the standard library, `numpy` and `torch`.
-3. **Install external tools** – ensure `ffmpeg`, `7z`, and `par2` commands are on your PATH.
-4. **Configure** – edit `f2yt_config.json` if you need custom paths or encoding settings. Defaults assume 720x720 video, 60fps, and RGB data frames.
-5. **Verify environment** – run the OS-appropriate dependency script listed above.
+#### Prerequisites
 
-## Usage
+1.  **NVIDIA GPU Drivers:** Install the latest drivers for your graphics card on your host machine.
+2.  **Docker:** Install Docker for your OS.
+
+#### Windows (WSL2) Setup
+1.  **Install Docker Desktop:** Download and install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/).
+2.  **Enable WSL2 Backend:** During installation (or in Settings > General), ensure "Use the WSL 2 based engine" is checked.
+3.  **Verify GPU:** Open PowerShell and run `nvidia-smi`. If you see your GPU, Docker will automatically be able to use it via WSL2.
+
+#### Linux Setup
+1.  **Install Docker Engine:** Follow the official guide for [Ubuntu/Debian/CentOS](https://docs.docker.com/engine/install/).
+2.  **Install NVIDIA Container Toolkit:** This is required for Docker to see your GPU.
+    ```bash
+    # Add the package repositories
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+    && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+      sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+      sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    # Install the toolkit
+    sudo apt-get update
+    sudo apt-get install -y nvidia-container-toolkit
+
+    # Configure Docker
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    ```
+
+#### Running with Docker
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/Keksmania/PythonFileToYoutube.git
+    cd PythonFileToYoutube
+    ```
+2.  **Build and Start the Container:**
+    ```bash
+    docker-compose up -d --build
+    ```
+3.  **Run the script:**
+    The `docker-compose.yml` maps the current folder to `/app` inside the container.
+    ```bash
+    # Example Encode
+    docker-compose exec f2yt python file_to_video_torch.py -mode encode -input "my_folder"
+
+    # Example Decode
+    docker-compose exec f2yt python file_to_video_torch.py -mode decode -input "my_folder_F2YT"
+    ```
+
+---
+
+### Option 2: Local Install (Manual)
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/Keksmania/PythonFileToYoutube.git
+    cd PythonFileToYoutube
+    ```
+2.  **Install Python dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  **Install external tools:**
+    *   **Windows:** Download and install FFmpeg, 7-Zip, and PAR2. Add their folders to your System `PATH`.
+    *   **Linux:** `sudo apt install ffmpeg p7zip-full par2`
+4.  **Verify Environment:**
+    *   Windows: `.\tools\check_deps_windows.cmd`
+    *   Linux: `./tools/check_deps_linux.sh`
+5.  **Run:**
+    ```bash
+    python file_to_video_torch.py -mode encode -input "my_folder"
+    ```
+
+## Usage Guide
 
 ### Encoding
 ```powershell
@@ -59,7 +121,8 @@ python file_to_video_torch.py -mode encode -input "C:\path\to\file_or_folder" [-
 ```powershell
 python file_to_video_torch.py -mode decode -input "video_part001.mp4,video_part002.mp4" [-output "C:\path\to\restore"] [-p password]
 ```
-- You **must** provide a comma-separated list of all segment files if the payload spans multiple videos.
+- **Folder Input:** You can point `-input` to a folder containing the video parts; the script will sort them automatically (recommended).
+- **File Input:** If providing a list, use a comma-separated string.
 - If no output directory is specified, it defaults to `_F2YT_Output` next to the first input file.
 - Decoded files end up in `<output>/Decoded_Files` once 7-Zip and PAR2 complete.
 
@@ -74,6 +137,8 @@ python file_to_video_torch.py -mode decode -input "video_part001.mp4,video_part0
 | `VIDEO_FPS` | Frames per second (default 60). |
 | `DATA_K_SIDE` | Data frame size (default 180). Must scale cleanly into video resolution (e.g., 720/180 = 4). |
 | `NUM_COLORS_DATA` | Palette size (power of two). |
+| `DATA_HAMMING_N` | Hamming Block Size (default 127). |
+| `DATA_HAMMING_K` | Hamming Data Size (default 120). Provides 94% efficiency. |
 | `PAR2_REDUNDANCY_PERCENT` | PAR2 redundancy percentage. |
 | `X264_CRF` | Quality parameter for x264/NVENC (lower = larger files/better quality). |
 | `ENABLE_NVENC` | Set to `true` to use GPU hardware encoding (faster, but larger files). |
@@ -88,16 +153,16 @@ python file_to_video_torch.py -mode decode -input "video_part001.mp4,video_part0
 1. **Preparation**: `prepare_files_for_encoding` compresses the payload with 7-Zip. It enforces a **1GB volume split** and generates **128KB-block PAR2** files for each volume to ensure recovery works even on large datasets with heavy video compression.
 2. **Metadata**: Info frames + barcode encode session metadata (JSON) using Hamming(7,4).
 3. **Async Encoding**: `DataProducerThread` reads raw bytes and unpacks them asynchronously on the CPU.
-4. **GPU Packing**: `encode_data_frames_gpu` packs unpacked bits into RGB tiles on the GPU using CUDA.
+4. **GPU Packing**: `encode_data_frames_gpu` packs unpacked bits into RGB tiles on the GPU using CUDA (FP16 optimized).
 5. **Video Stream**: `FFmpegConsumerThread` pipes the RGB stream into `ffmpeg` (via CPU `libx264` or GPU `h264_nvenc`) to produce MP4 segments.
-6. **Decoding**: Runs the inverse steps: `FrameProducerThread` fetches frames -> GPU Decodes -> `DataWriterThread` writes to disk -> PAR2 Repairs -> 7-Zip Extracts.
+6. **Decoding**: Runs the inverse steps: `ContinuousPipeFrameReader` stitches multiple video segments seamlessly using FFmpeg's concat protocol -> GPU Decodes (Hamming corrected) -> `DataWriterThread` writes to disk -> PAR2 Repairs -> 7-Zip Extracts.
 
 ## Troubleshooting
 
 - **Dependency missing** – Run the OS-specific dependency script; install any reported tool and rerun.
 - **CUDA unavailable** – Confirm `nvidia-smi` works and that your PyTorch build reports `torch.cuda.is_available() == True`.
 - **FFmpeg errors** – Inspect the log output. Ensure your `ffmpeg` build supports `libx264` (or `h264_nvenc` if enabled).
-- **Decode issues** – Verify that the info frame count matches (watch for warnings) and that you supply **all** segment files in the correct order.
+- **Decode hangs or stops early** – The script uses FFmpeg pipes. Ensure your disk has enough space for temporary files.
 - **Output Resolution** – The script forces strict resolution scaling filters to avoid "mod-16" cropping issues. Ensure `VIDEO_WIDTH` is divisible by `DATA_K_SIDE`.
 
 ## Contributing
