@@ -42,7 +42,6 @@ DECODE_CONFIG_EXPORT_KEYS = [
 ]
 
 # --- PyTorch Constants ---
-# INFO Frames must remain fixed at Hamming(7,4) so we can always bootstrap decoding
 INFO_HAMMING_K = 4
 INFO_HAMMING_N = 7
 INFO_K_SIDE = 16
@@ -1090,7 +1089,7 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
             while True:
                 # Also check consumer health while waiting for data
                 try:
-                    bits_tensor_cpu = data_queue.get(timeout=0.5)
+                    bits_tensor_cpu = data_queue.get(timeout=5.0)
                 except queue.Empty:
                     if not consumer.is_alive():
                          raise RuntimeError("FFmpeg Consumer died unexpectedly while waiting for data.")
