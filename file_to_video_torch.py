@@ -938,7 +938,6 @@ class FFmpegConsumerThread(threading.Thread):
         output_path = self._build_output_path(segment_index)
         command = self.ffmpeg_command_base + [str(output_path)]
         logging.info(f"Starting FFmpeg segment #{segment_index}: {output_path}")
-        # FIXED: Use sys.stderr to avoid pipe deadlock and enable visible error reporting
         self.ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=sys.stderr)
         self.output_paths.append(output_path)
         self.frames_written_in_segment = 0
@@ -1071,7 +1070,6 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         max_inflight = len(encode_streams) if encode_streams else 1
         next_stream_idx = 0
 
-        # FIXED: Safe Put Wrapper to detect consumer death and prevent hanging
         def safe_queue_put(item):
             while True:
                 try:
@@ -1142,7 +1140,6 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
         finally:
             if progress_bar: progress_bar.stop()
             
-            # --- CRITICAL FIX: Loop until Stop Signal is Accepted ---
             logging.info("Signaling FFmpeg consumer to finish...")
             while True:
                 try:
