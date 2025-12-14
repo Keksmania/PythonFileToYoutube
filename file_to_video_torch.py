@@ -165,7 +165,8 @@ def cleanup_temp_dir(temp_path: Path, label: str) -> None:
     """Best-effort removal of a temporary working directory."""
     if temp_path.exists():
         try:
-            shutil.rmtree(temp_path)
+            time.sleep(1.0)
+            shutil.rmtree(temp_path, ignore_errors=True)
             logging.info(f"Cleaned up {label} directory: {temp_path}")
         except Exception as e:
             logging.warning(f"Failed to remove {label} directory '{temp_path}': {e}")
@@ -244,9 +245,26 @@ def run_command(command: List[str], cwd: Optional[str] = None, stream_output: bo
     logging.info(f"Running command: {shlex.join(command)}")
     try:
         if stream_output:
-            process = subprocess.run(command, check=False, cwd=cwd, text=True, input="")
+            process = subprocess.run(
+                command, 
+                check=False, 
+                cwd=cwd, 
+                text=True, 
+                encoding='utf-8', 
+                errors='replace', 
+                input=""
+            )
         else:
-            process = subprocess.run(command, capture_output=True, text=True, check=False, cwd=cwd, input="")
+            process = subprocess.run(
+                command, 
+                capture_output=True, 
+                text=True, 
+                encoding='utf-8', 
+                errors='replace', 
+                check=False, 
+                cwd=cwd, 
+                input=""
+            )
         
         if not stream_output:
             if process.stdout: logging.info(f"STDOUT:\n{process.stdout.strip()}")
@@ -468,11 +486,7 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     
     logging.info(f"Compressing data payload from '{input_path}' with 7-Zip (splitting at 1GB)...")
     
-    # Sanitize filename
-    safe_stem = sanitize_filename(file_to_compress.stem)
-    if not safe_stem: safe_stem = "payload"
-    
-    payload_archive_base = temp_dir / f"{safe_stem}_data_archive.7z"
+    payload_archive_base = temp_dir / "payload.7z"
     
     # -v1024m forces 7-Zip to split volumes at 1GB
     cmd = [sz_path, "a", "-v1024m", "-y", str(payload_archive_base), str(file_to_compress)]
@@ -480,15 +494,14 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     
     if not run_command(cmd): logging.error("Failed to compress data payload."); return None
     
-    prefix = f"{safe_stem}_data_archive.7z"
-    archive_files = sorted([f for f in temp_dir.iterdir() if f.name.startswith(prefix)])
+    # Find the generated files (payload.7z.001, etc.)
+    archive_files = sorted([f for f in temp_dir.iterdir() if f.name.startswith("payload.7z")])
     
     if not archive_files:
         logging.error("Could not find generated archive files. Check 7-Zip output for errors.")
         return None
 
     redundancy = config["PAR2_REDUNDANCY_PERCENT"]
-    # Updated block size
     block_size = 131072 # 128KB
 
     logging.info(f"Creating PAR2 recovery files for {len(archive_files)} volume(s)...")
@@ -496,17 +509,15 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     for vol_file in archive_files:
         if vol_file.suffix == '.par2': continue
         par2_base_name = vol_file.name + ".recovery"
-        par2_full_path = temp_dir / par2_base_name
         
-        logging.info(f"  Generating PAR2 for volume: {vol_file.name} (Block size: 128KB)")
         cmd = [
             par2_path, "c", "-qq", 
             f"-r{redundancy}", 
             f"-s{block_size}", 
-            str(par2_full_path) + ".par2", 
-            str(vol_file)
+            par2_base_name + ".par2", 
+            vol_file.name
         ]
-        if not run_command(cmd): 
+        if not run_command(cmd, cwd=str(temp_dir)): 
             logging.error(f"Failed to create PAR2 for {vol_file.name}"); 
             return None
 
@@ -515,7 +526,7 @@ def prepare_files_for_encoding(input_path: Path, temp_dir: Path, config: Dict, p
     
     all_files = sorted([f for f in temp_dir.iterdir() if f.is_file()])
     for f_path in all_files:
-        if "data_archive.7z" in f_path.name and ".par2" not in f_path.name:
+        if "payload.7z" in f_path.name and ".par2" not in f_path.name:
             file_type = "sz_vol" 
         elif f_path.name.endswith(".par2") and ".vol" not in f_path.name:
             file_type = "par2_main"
@@ -1817,7 +1828,10 @@ def decode_orchestrator(input_path_str: str, output_dir: Path, password: Optiona
                 logging.info(f"Running PAR2 repair for volume set: {par2_path_obj.name}")
                 run_command([par2_path, "r", "-a", par2_path_obj.name], cwd=str(data_output_dir), stream_output=True)
 
-        archive_candidates = list(data_output_dir.glob("*_data_archive.7z*"))
+        archive_candidates = list(data_output_dir.glob("payload.7z*"))
+        if not archive_candidates:
+            archive_candidates = list(data_output_dir.glob("*_data_archive.7z*"))
+            
         main_archive = None
         for cand in archive_candidates:
             if cand.name.endswith(".7z") or cand.name.endswith(".001"):
@@ -1906,6 +1920,11 @@ def main():
     try:
         config = load_config()
         device = setup_pytorch()
+        
+        if device.type == "cpu" and config.get("ENABLE_NVENC", False):
+            logging.warning("Config has ENABLE_NVENC=True but no GPU was detected. Disabling NVENC to prevent errors.")
+            config["ENABLE_NVENC"] = False
+
         input_path_str = args.input
         
         # Handle comma-separated inputs for default output directory calculation
