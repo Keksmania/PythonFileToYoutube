@@ -888,7 +888,7 @@ class FFmpegConsumerThread(threading.Thread):
                 '-preset', 'medium',      
                 '-cq', str(crf),      # Constant Quality
                 '-spatial-aq', '1',   # Help retain spatial details (edges)
-                '-temporal-aq', '1'   
+                '-temporal-aq', '1',
             ]
         else:
             # CPU Settings (libx264)
@@ -896,16 +896,18 @@ class FFmpegConsumerThread(threading.Thread):
             codec_args = [
                 '-c:v', 'libx264',
                 '-preset', 'slow',
-                '-tune', 'stillimage',
+                '-tune', 'stillimage', 
                 '-crf', str(crf),
             ]
 
         self.ffmpeg_command_base = [
             self.config["FFMPEG_PATH"], '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}', '-pix_fmt', 'rgb24', '-r', str(fps), '-i', '-',
-            *codec_args,
-            '-g', str(keyint),
-            '-keyint_min', str(keyint),
+            *codec_args, 
+            '-g', str(keyint), 
+            '-bf', '125', 
+            '-rc-lookahead', '250',
+            '-b_strategy', '2',
             '-sc_threshold', '0',
             '-vf', f'scale={width}:{height}', 
             '-pix_fmt', 'yuv420p',
