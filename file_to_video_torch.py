@@ -898,6 +898,8 @@ class FFmpegConsumerThread(threading.Thread):
                 '-preset', 'slow',
                 '-tune', 'stillimage', 
                 '-crf', str(crf),
+                '-bf', '125', 
+                '-rc-lookahead', '250',
             ]
 
         self.ffmpeg_command_base = [
@@ -905,8 +907,6 @@ class FFmpegConsumerThread(threading.Thread):
             '-s', f'{width}x{height}', '-pix_fmt', 'rgb24', '-r', str(fps), '-i', '-',
             *codec_args, 
             '-g', str(keyint), 
-            '-bf', '125', 
-            '-rc-lookahead', '250',
             '-b_strategy', '2',
             '-sc_threshold', '0',
             '-vf', f'scale={width}:{height}', 
