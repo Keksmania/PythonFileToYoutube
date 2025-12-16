@@ -101,8 +101,9 @@ def load_config() -> Dict[str, Any]:
         "DATA_HAMMING_N": 127,
         "DATA_HAMMING_K": 120,
         "PAR2_REDUNDANCY_PERCENT": 1, 
-        "X264_CRF": 33,
-        "KEYINT_MAX": 64,
+        "X264_CRF": 38,
+        "GPU_CRF": 33,
+        "KEYINT_MAX": 250,
         "MAX_VIDEO_SEGMENT_HOURS": 11,
         "CPU_WORKER_THREADS": 2,
         "ENABLE_NVENC": True,
@@ -877,16 +878,16 @@ class FFmpegConsumerThread(threading.Thread):
         crf = self.config["X264_CRF"]
         fps = self.config["VIDEO_FPS"]
         keyint = self.config.get("KEYINT_MAX", 1)
+        GPU_CRF = self.config.get("GPU_CRF", 33)
         
         # GPU Encoding Switch
         if self.config.get("ENABLE_NVENC", False):
-            # GPU Settings (h264_nvenc)
-            # Reverted to basic safe arguments to avoid driver issues on Docker
-            logging.info(f"Using GPU Encoding (h264_nvenc) with CRF/CQ={crf}")
+            # GPU Settings (hevc_nvenc / H.265)
+            logging.info(f"Using GPU Encoding (hevc_nvenc) with CQ={GPU_CRF}")
             codec_args = [
                 '-c:v', 'h264_nvenc',
                 '-preset', 'medium',      
-                '-cq', str(crf),      # Constant Quality
+                '-cq', str(GPU_CRF),      # Constant Quality
                 '-spatial-aq', '1',   # Help retain spatial details (edges)
                 '-temporal-aq', '1',
             ]
@@ -907,7 +908,7 @@ class FFmpegConsumerThread(threading.Thread):
             '-s', f'{width}x{height}', '-pix_fmt', 'rgb24', '-r', str(fps), '-i', '-',
             *codec_args, 
             '-g', str(keyint), 
-            '-b_strategy', '2',
+            '-keyint_min', str(keyint),
             '-sc_threshold', '0',
             '-vf', f'scale={width}:{height}', 
             '-pix_fmt', 'yuv420p',
