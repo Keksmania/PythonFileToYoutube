@@ -910,7 +910,7 @@ class FFmpegConsumerThread(threading.Thread):
             '-sc_threshold', '0',
             '-vf', f'scale={width}:{height}', 
             '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart'
+            '-movflags', '+frag_keyframe+empty_moov'
         ]
 
         max_hours = self.config.get("MAX_VIDEO_SEGMENT_HOURS", 11)
@@ -1195,12 +1195,21 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 logging.info(f"Encoding pipeline finalized segment: {video_file}")
             logging.info("Encoding pipeline finished.")
         
-        total_payload_size = sum(f.stat().st_size for f in files_to_encode)
+        original_total_size = 0
+        try:
+            manifest_files = file_manifest.get('file_manifest_detailed', []) if file_manifest else []
+            original_total_size = sum(int(item.get('size', 0)) for item in manifest_files)
+        except Exception:
+            original_total_size = 0
+
+        compressed_payload_size = sum(f.stat().st_size for f in files_to_encode)
+
         logging.info("--- ENCODING SUMMARY (Overall) ---")
         logging.info(f"Original Input: {input_path}")
-        logging.info(f"Total Payload Size (after 7z/par2): {total_payload_size / 1024:.2f} KB")
+        logging.info(f"Total Original Size (pre-7z/par2): {original_total_size / (1024*1024):.2f} MB")
+        logging.info(f"Total Payload Size (after 7z/par2): {compressed_payload_size / 1024:.2f} KB")
         logging.info("Output Video Files:")
-        
+
         total_video_size = 0
         for video_file in produced_files:
             if video_file.exists():
@@ -1209,11 +1218,11 @@ def encode_orchestrator(input_path: Path, output_dir: Path, password: Optional[s
                 logging.info(f"  - {video_file} ({video_size / (1024*1024):.2f} MB)")
             else:
                 logging.info(f"  - {video_file} (missing on disk)")
-        
-        if total_payload_size > 0:
-             ratio = total_video_size / total_payload_size
-             logging.info(f"Total Video Size: {total_video_size / (1024*1024):.2f} MB")
-             logging.info(f"Overall Storage Ratio: {ratio:.2f}x (Video is {ratio:.2f} times larger than payload)")
+
+        if original_total_size > 0:
+            ratio = total_video_size / original_total_size
+            logging.info(f"Total Video Size: {total_video_size / (1024*1024):.2f} MB")
+            logging.info(f"Overall Storage Ratio: {ratio:.2f}x (Video is {ratio:.2f} times larger than original input)")
 
         encode_elapsed = time.perf_counter() - encode_start
         logging.info(f"Encoding completed successfully in {encode_elapsed:.1f}s ({encode_elapsed/60:.2f} min).")
@@ -1232,7 +1241,6 @@ class DataWriterThread(threading.Thread):
         try:
             file_handles, current_file_idx, bytes_written_to_current_file = {}, 0, 0
             manifest_files = self.manifest['file_manifest_detailed']
-            # Optimization: Use a larger buffer size for file writing (1MB)
             write_buffer_size = 1024 * 1024 * 4 # 4MB Buffer
             
             while not self.stop_event.is_set():
